@@ -1,9 +1,10 @@
 mod app;
 mod config;
+mod database;
 mod logging;
 mod shutdown;
 
-use std::io;
+use std::{io, sync::Arc};
 
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -13,6 +14,10 @@ async fn main() -> Result<(), io::Error> {
     logging::init();
 
     let config = config::Config::load().map_err(io::Error::other)?;
+    let db_pool = database::connect(&config.database)
+        .await
+        .map_err(io::Error::other)?;
+    let app_state = Arc::new(app::AppState { db_pool });
     let address = config.server.socket_addr();
     let listener = TcpListener::bind(address).await?;
 
@@ -28,7 +33,7 @@ async fn main() -> Result<(), io::Error> {
         "starting HTTP server"
     );
 
-    axum::serve(listener, app::router())
+    axum::serve(listener, app::router(app_state))
         .with_graceful_shutdown(shutdown::wait_for_signal())
         .await
         .map_err(|error| {
