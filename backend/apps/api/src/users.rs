@@ -192,3 +192,36 @@ pub async fn update_password_hash(
     .fetch_optional(&mut **transaction)
     .await
 }
+
+pub async fn update_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+    display_name: &str,
+    bio: Option<&str>,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET
+            display_name = $2,
+            bio = $3,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING
+            id,
+            email,
+            password_hash,
+            display_name,
+            avatar_object_key,
+            bio,
+            email_verified_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .bind(bio)
+    .fetch_optional(pool)
+    .await
+}
