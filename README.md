@@ -80,5 +80,6 @@ It uses the existing object storage environment variables and exposes helpers fo
 ```bash
 cd frontend
 npm install
+export VITE_API_BASE_URL=http://127.0.0.1:8080
 npm run dev -- --host 0.0.0.0 --port 8080
 ```
