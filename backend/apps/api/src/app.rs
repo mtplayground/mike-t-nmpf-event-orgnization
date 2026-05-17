@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{JwtService, PasswordService},
+    email::{EmailError, EmailService},
     email_verification::{EmailVerificationError, EmailVerificationService},
     error::{ApiResponse, AppError},
     extract::ValidatedJson,
@@ -32,6 +33,7 @@ pub struct AppState {
     pub password_service: PasswordService,
     pub jwt_service: JwtService,
     pub refresh_token_service: RefreshTokenService,
+    pub email_service: EmailService,
     pub email_verification_service: EmailVerificationService,
     pub password_reset_service: PasswordResetService,
     pub login_rate_limiter: Arc<LoginRateLimiter>,
@@ -253,9 +255,19 @@ async fn register(
         user_id = %user.id,
         email = %user.email,
         verification_expires_at = %verification.expires_at,
-        verification_token = %verification.token,
-        "created user registration and issued email verification token"
+        "created user registration and queued email verification"
     );
+
+    state
+        .email_service
+        .send_verification_email(
+            &user.email,
+            &user.display_name,
+            &verification.token,
+            verification.expires_at,
+        )
+        .await
+        .map_err(map_email_send_error)?;
 
     Ok(Json(ApiResponse::new(RegisterResponse {
         user_id: user.id,
@@ -318,9 +330,19 @@ async fn resend_verification(
         user_id = %user.id,
         email = %user.email,
         verification_expires_at = %verification.expires_at,
-        verification_token = %verification.token,
-        "reissued email verification token"
+        "requeued email verification"
     );
+
+    state
+        .email_service
+        .send_verification_email(
+            &user.email,
+            &user.display_name,
+            &verification.token,
+            verification.expires_at,
+        )
+        .await
+        .map_err(map_email_send_error)?;
 
     Ok(Json(ApiResponse::new(ResendVerificationResponse {
         accepted: true,
@@ -445,9 +467,19 @@ async fn forgot_password(
         user_id = %user.id,
         email = %user.email,
         password_reset_expires_at = %reset.expires_at,
-        password_reset_token = %reset.token,
-        "issued password reset token"
+        "queued password reset email"
     );
+
+    state
+        .email_service
+        .send_password_reset_email(
+            &user.email,
+            &user.display_name,
+            &reset.token,
+            reset.expires_at,
+        )
+        .await
+        .map_err(map_email_send_error)?;
 
     Ok(Json(ApiResponse::new(ForgotPasswordResponse {
         accepted: true,
@@ -554,6 +586,10 @@ fn map_password_reset_error(error: PasswordResetError) -> AppError {
         | PasswordResetError::TokenAlreadyUsed
         | PasswordResetError::TokenExpired => AppError::bad_request(error.to_string()),
     }
+}
+
+fn map_email_send_error(error: EmailError) -> AppError {
+    AppError::internal(format!("failed to queue transactional email: {error}"))
 }
 
 #[derive(Debug)]
