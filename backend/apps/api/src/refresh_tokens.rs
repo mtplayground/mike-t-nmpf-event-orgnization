@@ -116,6 +116,27 @@ impl RefreshTokenService {
 
         Ok(result.rows_affected())
     }
+
+    pub async fn revoke_token(
+        &self,
+        pool: &PgPool,
+        presented_token: &str,
+    ) -> Result<bool, RefreshTokenError> {
+        let token_hash = hash_refresh_token(presented_token);
+        let result = sqlx::query(
+            r#"
+            UPDATE refresh_tokens
+            SET revoked_at = NOW()
+            WHERE token_hash = $1
+              AND revoked_at IS NULL
+            "#,
+        )
+        .bind(token_hash)
+        .execute(pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 pub fn hash_refresh_token(token: &str) -> String {

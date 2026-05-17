@@ -21,6 +21,10 @@ async fn main() -> Result<(), io::Error> {
     logging::init();
 
     let config = config::Config::load().map_err(io::Error::other)?;
+    let password_service = auth::PasswordService::new().map_err(io::Error::other)?;
+    let jwt_service = auth::JwtService::from_config(&config.jwt).map_err(io::Error::other)?;
+    let refresh_token_service = refresh_tokens::RefreshTokenService::new(jwt_service.clone());
+    let email_verification_service = email_verification::EmailVerificationService::new();
     let db_pool = database::connect(&config.database)
         .await
         .map_err(io::Error::other)?;
@@ -30,6 +34,11 @@ async fn main() -> Result<(), io::Error> {
     let app_state = Arc::new(app::AppState {
         db_pool,
         object_storage,
+        password_service,
+        jwt_service,
+        refresh_token_service,
+        email_verification_service,
+        login_rate_limiter: Arc::new(app::LoginRateLimiter::new()),
     });
     let address = config.server.socket_addr();
     let listener = TcpListener::bind(address).await?;

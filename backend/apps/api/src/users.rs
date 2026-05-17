@@ -49,6 +49,31 @@ pub async fn find_user_by_email(
     .await
 }
 
+pub async fn find_user_by_id(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        SELECT
+            id,
+            email,
+            password_hash,
+            display_name,
+            avatar_object_key,
+            bio,
+            email_verified_at,
+            created_at,
+            updated_at
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn insert_user(
     transaction: &mut Transaction<'_, Postgres>,
     new_user: &NewUser,
