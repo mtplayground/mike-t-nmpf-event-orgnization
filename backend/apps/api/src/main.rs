@@ -7,6 +7,7 @@ mod error;
 mod extract;
 mod logging;
 mod object_storage;
+mod password_reset;
 mod refresh_tokens;
 mod shutdown;
 mod users;
@@ -25,6 +26,7 @@ async fn main() -> Result<(), io::Error> {
     let jwt_service = auth::JwtService::from_config(&config.jwt).map_err(io::Error::other)?;
     let refresh_token_service = refresh_tokens::RefreshTokenService::new(jwt_service.clone());
     let email_verification_service = email_verification::EmailVerificationService::new();
+    let password_reset_service = password_reset::PasswordResetService::new();
     let db_pool = database::connect(&config.database)
         .await
         .map_err(io::Error::other)?;
@@ -38,6 +40,7 @@ async fn main() -> Result<(), io::Error> {
         jwt_service,
         refresh_token_service,
         email_verification_service,
+        password_reset_service,
         login_rate_limiter: Arc::new(app::LoginRateLimiter::new()),
     });
     let address = config.server.socket_addr();

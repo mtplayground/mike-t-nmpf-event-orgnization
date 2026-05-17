@@ -20,6 +20,7 @@ use crate::{
     email_verification::{EmailVerificationError, EmailVerificationService},
     error::{ApiResponse, AppError},
     extract::ValidatedJson,
+    password_reset::{PasswordResetError, PasswordResetService},
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
     users::{self, NewUser},
 };
@@ -32,6 +33,7 @@ pub struct AppState {
     pub jwt_service: JwtService,
     pub refresh_token_service: RefreshTokenService,
     pub email_verification_service: EmailVerificationService,
+    pub password_reset_service: PasswordResetService,
     pub login_rate_limiter: Arc<LoginRateLimiter>,
 }
 
@@ -98,6 +100,32 @@ struct ResendVerificationResponse {
 }
 
 #[derive(Debug, Deserialize, Validate)]
+struct ForgotPasswordRequest {
+    #[validate(email(message = "email must be a valid email address"))]
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForgotPasswordResponse {
+    accepted: bool,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct ResetPasswordRequest {
+    #[validate(length(min = 64, max = 64, message = "token must be a valid password reset token"))]
+    token: String,
+    #[validate(length(min = 8, max = 128, message = "password must be between 8 and 128 characters"))]
+    password: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResetPasswordResponse {
+    user_id: Uuid,
+    email: String,
+    password_reset: bool,
+}
+
+#[derive(Debug, Deserialize, Validate)]
 struct LoginRequest {
     #[validate(email(message = "email must be a valid email address"))]
     email: String,
@@ -147,6 +175,8 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
+        .route("/auth/forgot-password", post(forgot_password))
+        .route("/auth/reset-password", post(reset_password))
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
         .route("/validation-probe", post(validation_probe))
@@ -392,6 +422,74 @@ async fn logout(
     Ok(Json(ApiResponse::new(LogoutResponse { revoked })))
 }
 
+async fn forgot_password(
+    State(state): State<SharedAppState>,
+    payload: ValidatedJson<ForgotPasswordRequest>,
+) -> Result<Json<ApiResponse<ForgotPasswordResponse>>, AppError> {
+    let email = normalize_email(&payload.email);
+    let Some(user) = users::find_user_by_email(&state.db_pool, &email)
+        .await
+        .map_err(AppError::from)? else {
+        return Ok(Json(ApiResponse::new(ForgotPasswordResponse {
+            accepted: true,
+        })));
+    };
+
+    let reset = state
+        .password_reset_service
+        .issue_for_user(&state.db_pool, user.id)
+        .await
+        .map_err(map_password_reset_error)?;
+
+    info!(
+        user_id = %user.id,
+        email = %user.email,
+        password_reset_expires_at = %reset.expires_at,
+        password_reset_token = %reset.token,
+        "issued password reset token"
+    );
+
+    Ok(Json(ApiResponse::new(ForgotPasswordResponse {
+        accepted: true,
+    })))
+}
+
+async fn reset_password(
+    State(state): State<SharedAppState>,
+    payload: ValidatedJson<ResetPasswordRequest>,
+) -> Result<Json<ApiResponse<ResetPasswordResponse>>, AppError> {
+    let password_hash = state
+        .password_service
+        .hash_password(payload.password.as_str())
+        .map_err(|error| AppError::internal(format!("failed to hash password: {error}")))?;
+
+    let mut transaction = state.db_pool.begin().await.map_err(AppError::from)?;
+    let reset = state
+        .password_reset_service
+        .consume_token_in_tx(&mut transaction, payload.token.trim())
+        .await
+        .map_err(map_password_reset_error)?;
+
+    let user = users::update_password_hash(&mut transaction, reset.user_id, &password_hash)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::bad_request("password reset token references an unknown user"))?;
+
+    state
+        .refresh_token_service
+        .revoke_all_for_user_in_tx(&mut transaction, user.id)
+        .await
+        .map_err(map_refresh_token_error)?;
+
+    transaction.commit().await.map_err(AppError::from)?;
+
+    Ok(Json(ApiResponse::new(ResetPasswordResponse {
+        user_id: user.id,
+        email: user.email,
+        password_reset: true,
+    })))
+}
+
 fn build_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS, Method::POST])
@@ -446,6 +544,15 @@ fn map_refresh_token_error(error: RefreshTokenError) -> AppError {
         | RefreshTokenError::RefreshTokenRevoked
         | RefreshTokenError::RefreshTokenExpired
         | RefreshTokenError::TokenSubjectMismatch { .. } => AppError::bad_request(error.to_string()),
+    }
+}
+
+fn map_password_reset_error(error: PasswordResetError) -> AppError {
+    match error {
+        PasswordResetError::Database(error) => AppError::from(error),
+        PasswordResetError::TokenNotFound
+        | PasswordResetError::TokenAlreadyUsed
+        | PasswordResetError::TokenExpired => AppError::bad_request(error.to_string()),
     }
 }
 

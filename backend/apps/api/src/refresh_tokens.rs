@@ -4,7 +4,7 @@ use std::fmt::{self, Write as _};
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{Executor, FromRow, PgPool, Postgres};
+use sqlx::{Executor, FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::auth::{AuthError, JwtService, TokenEnvelope};
@@ -102,17 +102,17 @@ impl RefreshTokenService {
         pool: &PgPool,
         user_id: Uuid,
     ) -> Result<u64, RefreshTokenError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE refresh_tokens
-            SET revoked_at = NOW()
-            WHERE user_id = $1
-              AND revoked_at IS NULL
-            "#,
-        )
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+        let result = revoke_all_for_user_executor(pool, user_id).await?;
+
+        Ok(result.rows_affected())
+    }
+
+    pub async fn revoke_all_for_user_in_tx(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        user_id: Uuid,
+    ) -> Result<u64, RefreshTokenError> {
+        let result = revoke_all_for_user_executor(&mut **transaction, user_id).await?;
 
         Ok(result.rows_affected())
     }
@@ -188,6 +188,26 @@ impl From<sqlx::Error> for RefreshTokenError {
     fn from(value: sqlx::Error) -> Self {
         Self::Database(value)
     }
+}
+
+async fn revoke_all_for_user_executor<'a, E>(
+    executor: E,
+    user_id: Uuid,
+) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+where
+    E: Executor<'a, Database = Postgres>,
+{
+    sqlx::query(
+        r#"
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE user_id = $1
+          AND revoked_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .execute(executor)
+    .await
 }
 
 async fn insert_refresh_token<'a, E>(
