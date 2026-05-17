@@ -6,6 +6,7 @@ mod extract;
 mod logging;
 mod object_storage;
 mod shutdown;
+mod users;
 
 use std::{io, sync::Arc};
 
