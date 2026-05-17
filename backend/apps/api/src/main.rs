@@ -1,6 +1,8 @@
 mod app;
 mod config;
 mod database;
+mod error;
+mod extract;
 mod logging;
 mod object_storage;
 mod shutdown;
