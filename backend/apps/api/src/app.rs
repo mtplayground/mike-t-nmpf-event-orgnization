@@ -176,12 +176,23 @@ struct CurrentUserResponse {
     id: Uuid,
     email: String,
     display_name: String,
+    bio: Option<String>,
+    avatar_object_key: Option<String>,
     email_verified: bool,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct UpdateProfileRequest {
+    #[validate(length(min = 3, max = 64, message = "display_name must be between 3 and 64 characters"))]
+    display_name: Option<String>,
+    #[validate(length(max = 500, message = "bio must be 500 characters or fewer"))]
+    bio: Option<String>,
 }
 
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
+        .route("/me", get(read_profile).patch(update_profile))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::require_current_user,
@@ -468,8 +479,70 @@ async fn current_user(
         id: current_user.id,
         email: current_user.email.clone(),
         display_name: current_user.display_name.clone(),
+        bio: None,
+        avatar_object_key: None,
         email_verified: current_user.email_verified_at.is_some(),
     }))
+}
+
+async fn read_profile(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<CurrentUserResponse>>, AppError> {
+    let user = users::find_user_by_id(&state.db_pool, current_user.id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_current_user_response(&user))))
+}
+
+async fn update_profile(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<UpdateProfileRequest>,
+) -> Result<Json<ApiResponse<CurrentUserResponse>>, AppError> {
+    if payload.display_name.is_none() && payload.bio.is_none() {
+        return Err(AppError::bad_request(
+            "at least one profile field must be provided",
+        ));
+    }
+
+    let existing_user = users::find_user_by_id(&state.db_pool, current_user.id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
+
+    let display_name = match payload.display_name.as_deref() {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::bad_request("display_name cannot be blank"));
+            }
+
+            trimmed.to_owned()
+        }
+        None => existing_user.display_name.clone(),
+    };
+
+    let bio = match payload.bio.as_ref() {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        None => existing_user.bio.clone(),
+    };
+
+    let user = users::update_profile(&state.db_pool, current_user.id, &display_name, bio.as_deref())
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_current_user_response(&user))))
 }
 
 async fn forgot_password(
@@ -584,6 +657,17 @@ fn build_token_response(
             display_name: user.display_name.clone(),
             email_verified: user.email_verified_at.is_some(),
         },
+    }
+}
+
+fn build_current_user_response(user: &users::User) -> CurrentUserResponse {
+    CurrentUserResponse {
+        id: user.id,
+        email: user.email.clone(),
+        display_name: user.display_name.clone(),
+        bio: user.bio.clone(),
+        avatar_object_key: user.avatar_object_key.clone(),
+        email_verified: user.email_verified_at.is_some(),
     }
 }
 
