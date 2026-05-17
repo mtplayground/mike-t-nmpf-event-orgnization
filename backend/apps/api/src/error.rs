@@ -37,6 +37,8 @@ pub struct ErrorEnvelope {
 #[derive(Debug)]
 pub enum AppError {
     BadRequest { message: String },
+    Conflict { message: String },
+    Internal { message: String },
     Validation(ValidationErrors),
     Json(JsonRejection),
     Database(sqlx::Error),
@@ -49,16 +51,31 @@ impl AppError {
         }
     }
 
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict {
+            message: message.into(),
+        }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+        }
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest { .. } | Self::Validation(_) | Self::Json(_) => StatusCode::BAD_REQUEST,
-            Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Internal { .. } | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     fn code(&self) -> &'static str {
         match self {
             Self::BadRequest { .. } => "bad_request",
+            Self::Conflict { .. } => "conflict",
+            Self::Internal { .. } => "internal_error",
             Self::Validation(_) => "validation_failed",
             Self::Json(_) => "invalid_json",
             Self::Database(_) => "database_error",
@@ -68,6 +85,8 @@ impl AppError {
     fn message(&self) -> String {
         match self {
             Self::BadRequest { message } => message.clone(),
+            Self::Conflict { message } => message.clone(),
+            Self::Internal { message } => message.clone(),
             Self::Validation(_) => "One or more request fields failed validation.".to_owned(),
             Self::Json(rejection) => rejection.body_text(),
             Self::Database(_) => "A database error occurred while processing the request.".to_owned(),
@@ -119,6 +138,8 @@ impl fmt::Display for AppError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BadRequest { message } => formatter.write_str(message),
+            Self::Conflict { message } => formatter.write_str(message),
+            Self::Internal { message } => formatter.write_str(message),
             Self::Validation(_) => formatter.write_str("request validation failed"),
             Self::Json(rejection) => write!(formatter, "invalid request body: {rejection}"),
             Self::Database(error) => write!(formatter, "database error: {error}"),
