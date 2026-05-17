@@ -2,12 +2,14 @@ use std::ops::{Deref, DerefMut};
 
 use axum::{
     Json,
-    extract::{FromRequest, Request},
+    extract::{FromRequest, FromRequestParts, Request},
+    http::request::Parts,
 };
 use serde::de::DeserializeOwned;
 use validator::Validate;
 
 use crate::error::AppError;
+use crate::users::AuthUserContext;
 
 pub struct ValidatedJson<T>(pub T);
 
@@ -36,5 +38,35 @@ where
         let Json(value) = Json::<T>::from_request(req, state).await?;
         value.validate()?;
         Ok(Self(value))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CurrentUser(pub AuthUserContext);
+
+impl Deref for CurrentUser {
+    type Target = AuthUserContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<S> FromRequestParts<S> for CurrentUser
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthUserContext>()
+            .cloned()
+            .map(Self)
+            .ok_or_else(|| AppError::unauthorized("authentication is required"))
     }
 }
