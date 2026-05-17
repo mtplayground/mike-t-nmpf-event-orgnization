@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -65,6 +65,53 @@ impl fmt::Display for EventImageVariantParseError {
 }
 
 impl std::error::Error for EventImageVariantParseError {}
+
+pub async fn upsert_event_image(
+    pool: &PgPool,
+    event_id: Uuid,
+    object_key: &str,
+    variant: EventImageVariant,
+    width: i32,
+    height: i32,
+    bytes: i64,
+) -> Result<EventImage, sqlx::Error> {
+    sqlx::query_as::<_, EventImage>(
+        r#"
+        INSERT INTO event_images (
+            event_id,
+            object_key,
+            variant,
+            width,
+            height,
+            bytes
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (event_id, variant)
+        DO UPDATE SET
+            object_key = EXCLUDED.object_key,
+            width = EXCLUDED.width,
+            height = EXCLUDED.height,
+            bytes = EXCLUDED.bytes
+        RETURNING
+            id,
+            event_id,
+            object_key,
+            variant,
+            width,
+            height,
+            bytes,
+            created_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(object_key)
+    .bind(variant.as_str())
+    .bind(width)
+    .bind(height)
+    .bind(bytes)
+    .fetch_one(pool)
+    .await
+}
 
 #[cfg(test)]
 mod tests {
