@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod auth_middleware;
 mod config;
 mod database;
 mod email;

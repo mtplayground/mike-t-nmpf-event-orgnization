@@ -38,6 +38,7 @@ pub struct ErrorEnvelope {
 pub enum AppError {
     BadRequest { message: String },
     Conflict { message: String },
+    Unauthorized { message: String },
     Internal { message: String },
     Validation(ValidationErrors),
     Json(JsonRejection),
@@ -57,6 +58,12 @@ impl AppError {
         }
     }
 
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::Unauthorized {
+            message: message.into(),
+        }
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
@@ -67,6 +74,7 @@ impl AppError {
         match self {
             Self::BadRequest { .. } | Self::Validation(_) | Self::Json(_) => StatusCode::BAD_REQUEST,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             Self::Internal { .. } | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -75,6 +83,7 @@ impl AppError {
         match self {
             Self::BadRequest { .. } => "bad_request",
             Self::Conflict { .. } => "conflict",
+            Self::Unauthorized { .. } => "unauthorized",
             Self::Internal { .. } => "internal_error",
             Self::Validation(_) => "validation_failed",
             Self::Json(_) => "invalid_json",
@@ -86,6 +95,7 @@ impl AppError {
         match self {
             Self::BadRequest { message } => message.clone(),
             Self::Conflict { message } => message.clone(),
+            Self::Unauthorized { message } => message.clone(),
             Self::Internal { message } => message.clone(),
             Self::Validation(_) => "One or more request fields failed validation.".to_owned(),
             Self::Json(rejection) => rejection.body_text(),
@@ -139,6 +149,7 @@ impl fmt::Display for AppError {
         match self {
             Self::BadRequest { message } => formatter.write_str(message),
             Self::Conflict { message } => formatter.write_str(message),
+            Self::Unauthorized { message } => formatter.write_str(message),
             Self::Internal { message } => formatter.write_str(message),
             Self::Validation(_) => formatter.write_str("request validation failed"),
             Self::Json(rejection) => write!(formatter, "invalid request body: {rejection}"),

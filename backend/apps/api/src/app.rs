@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{Json, Router, extract::State, routing::{get, post}};
+use axum::{Json, Router, extract::State, middleware, routing::{get, post}};
 use chrono::{DateTime, Duration, Utc};
 use http::{HeaderValue, Method};
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,11 @@ use uuid::Uuid;
 
 use crate::{
     auth::{JwtService, PasswordService},
+    auth_middleware,
     email::{EmailError, EmailService},
     email_verification::{EmailVerificationError, EmailVerificationService},
     error::{ApiResponse, AppError},
-    extract::ValidatedJson,
+    extract::{CurrentUser, ValidatedJson},
     password_reset::{PasswordResetError, PasswordResetService},
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
     users::{self, NewUser},
@@ -170,7 +171,22 @@ struct LogoutResponse {
     revoked: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct CurrentUserResponse {
+    id: Uuid,
+    email: String,
+    display_name: String,
+    email_verified: bool,
+}
+
 pub fn router(state: SharedAppState) -> Router {
+    let protected_routes = Router::new()
+        .route("/auth/me", get(current_user))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::require_current_user,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/auth/register", post(register))
@@ -182,6 +198,7 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
         .route("/validation-probe", post(validation_probe))
+        .merge(protected_routes)
         .with_state(state)
         .layer(CompressionLayer::new())
         .layer(build_cors_layer())
@@ -442,6 +459,17 @@ async fn logout(
         .map_err(map_refresh_token_error)?;
 
     Ok(Json(ApiResponse::new(LogoutResponse { revoked })))
+}
+
+async fn current_user(
+    current_user: CurrentUser,
+) -> Json<ApiResponse<CurrentUserResponse>> {
+    Json(ApiResponse::new(CurrentUserResponse {
+        id: current_user.id,
+        email: current_user.email.clone(),
+        display_name: current_user.display_name.clone(),
+        email_verified: current_user.email_verified_at.is_some(),
+    }))
 }
 
 async fn forgot_password(

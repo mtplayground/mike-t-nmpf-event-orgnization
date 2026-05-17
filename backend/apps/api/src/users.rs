@@ -18,6 +18,14 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AuthUserContext {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+}
+
 pub struct NewUser {
     pub email: String,
     pub password_hash: String,
@@ -65,6 +73,26 @@ pub async fn find_user_by_id(
             email_verified_at,
             created_at,
             updated_at
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn find_auth_user_by_id(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<AuthUserContext>, sqlx::Error> {
+    sqlx::query_as::<_, AuthUserContext>(
+        r#"
+        SELECT
+            id,
+            email,
+            display_name,
+            email_verified_at
         FROM users
         WHERE id = $1
         "#,
