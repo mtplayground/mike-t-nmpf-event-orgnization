@@ -2,6 +2,7 @@ mod app;
 mod auth;
 mod config;
 mod database;
+mod email_verification;
 mod error;
 mod extract;
 mod logging;
