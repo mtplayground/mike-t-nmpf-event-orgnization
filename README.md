@@ -25,6 +25,7 @@ Initial repository structure for the event organization platform.
 
 ```bash
 export PATH=/usr/local/cargo/bin:$PATH
+cp .env.example .env
 cd backend
 cargo build
 ```
