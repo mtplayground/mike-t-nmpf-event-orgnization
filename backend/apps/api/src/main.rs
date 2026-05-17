@@ -6,6 +6,7 @@ mod error;
 mod extract;
 mod logging;
 mod object_storage;
+mod refresh_tokens;
 mod shutdown;
 mod users;
 

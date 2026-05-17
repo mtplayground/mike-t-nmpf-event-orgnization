@@ -338,7 +338,10 @@ mod tests {
 
     #[test]
     fn refresh_token_is_rejected_by_access_verifier() {
-        let service = match JwtService::from_config(&jwt_config()) {
+        let mut config = jwt_config();
+        config.refresh_secret = config.access_secret.clone();
+
+        let service = match JwtService::from_config(&config) {
             Ok(service) => service,
             Err(error) => panic!("jwt service should initialize: {error}"),
         };
