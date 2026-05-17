@@ -6,6 +6,7 @@ mod database;
 mod email;
 mod email_verification;
 mod error;
+mod events;
 mod event_images;
 mod extract;
 mod logging;
