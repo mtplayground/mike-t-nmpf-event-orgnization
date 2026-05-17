@@ -3,6 +3,7 @@ import { NavLink, Outlet } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/stores/app-store';
+import { useAuthStore } from '@/stores/auth-store';
 
 const routes = [
   { to: '/', label: 'Overview' },
@@ -15,6 +16,8 @@ export function RootLayout() {
   const apiBaseUrl = useAppStore((state) => state.apiBaseUrl);
   const theme = useAppStore((state) => state.theme);
   const toggleTheme = useAppStore((state) => state.toggleTheme);
+  const session = useAuthStore((state) => state.session);
+  const logout = useAuthStore((state) => state.logout);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -50,8 +53,22 @@ export function RootLayout() {
             </nav>
             <div className="flex items-center gap-3">
               <span className="rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs text-muted-foreground">
+                {session
+                  ? `Signed in as ${session.user.display_name}`
+                  : 'Guest mode'}
+              </span>
+              <span className="rounded-full border border-border/60 bg-background/70 px-3 py-1 text-xs text-muted-foreground">
                 API: {apiBaseUrl}
               </span>
+              {session ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void logout()}
+                >
+                  Sign out
+                </Button>
+              ) : null}
               <Button variant="outline" size="sm" onClick={toggleTheme}>
                 {theme === 'light' ? (
                   <MoonStar className="h-4 w-4" />
