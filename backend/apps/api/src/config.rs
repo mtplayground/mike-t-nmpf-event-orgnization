@@ -1,6 +1,7 @@
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},
+    str::FromStr,
 };
 
 use serde::Deserialize;
@@ -25,6 +26,12 @@ impl Config {
             },
             database: DatabaseConfig {
                 url: raw.database_url,
+                ssl_mode: raw.database_ssl_mode,
+                min_connections: raw.database_min_connections,
+                max_connections: raw.database_max_connections,
+                acquire_timeout_seconds: raw.database_acquire_timeout_seconds,
+                idle_timeout_seconds: raw.database_idle_timeout_seconds,
+                max_lifetime_seconds: raw.database_max_lifetime_seconds,
             },
             jwt: JwtConfig {
                 access_secret: raw.jwt_access_secret,
@@ -82,6 +89,41 @@ impl Config {
             return Err(ConfigError::invalid("PORT", "port must be greater than zero"));
         }
 
+        if self.database.max_connections == 0 {
+            return Err(ConfigError::invalid(
+                "DATABASE_MAX_CONNECTIONS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.database.min_connections > self.database.max_connections {
+            return Err(ConfigError::invalid(
+                "DATABASE_MIN_CONNECTIONS",
+                "cannot be greater than DATABASE_MAX_CONNECTIONS",
+            ));
+        }
+
+        if self.database.acquire_timeout_seconds == 0 {
+            return Err(ConfigError::invalid(
+                "DATABASE_ACQUIRE_TIMEOUT_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.database.idle_timeout_seconds == 0 {
+            return Err(ConfigError::invalid(
+                "DATABASE_IDLE_TIMEOUT_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
+        if self.database.max_lifetime_seconds == 0 {
+            return Err(ConfigError::invalid(
+                "DATABASE_MAX_LIFETIME_SECONDS",
+                "must be greater than zero",
+            ));
+        }
+
         if self.jwt.access_ttl_seconds == 0 {
             return Err(ConfigError::invalid(
                 "JWT_ACCESS_TTL_SECONDS",
@@ -122,6 +164,21 @@ impl ServerConfig {
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub url: String,
+    pub ssl_mode: DatabaseSslMode,
+    pub min_connections: u32,
+    pub max_connections: u32,
+    pub acquire_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
+    pub max_lifetime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DatabaseSslMode {
+    Disable,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +218,18 @@ struct RawConfig {
     #[serde(default = "default_port")]
     port: u16,
     database_url: String,
+    #[serde(default = "default_database_ssl_mode")]
+    database_ssl_mode: DatabaseSslMode,
+    #[serde(default = "default_database_min_connections")]
+    database_min_connections: u32,
+    #[serde(default = "default_database_max_connections")]
+    database_max_connections: u32,
+    #[serde(default = "default_database_acquire_timeout_seconds")]
+    database_acquire_timeout_seconds: u64,
+    #[serde(default = "default_database_idle_timeout_seconds")]
+    database_idle_timeout_seconds: u64,
+    #[serde(default = "default_database_max_lifetime_seconds")]
+    database_max_lifetime_seconds: u64,
     jwt_access_secret: String,
     jwt_refresh_secret: String,
     #[serde(default = "default_jwt_issuer")]
@@ -234,6 +303,33 @@ impl fmt::Display for ConfigLoadError {
 
 impl std::error::Error for ConfigLoadError {}
 
+impl<'de> Deserialize<'de> for DatabaseSslMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for DatabaseSslMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "disable" => Ok(Self::Disable),
+            "prefer" => Ok(Self::Prefer),
+            "require" => Ok(Self::Require),
+            "verify-ca" | "verify_ca" => Ok(Self::VerifyCa),
+            "verify-full" | "verify_full" => Ok(Self::VerifyFull),
+            other => Err(format!(
+                "unsupported DATABASE_SSL_MODE '{other}', expected one of disable, prefer, require, verify-ca, verify-full"
+            )),
+        }
+    }
+}
+
 fn require_non_empty(field: &str, value: &str) -> Result<(), ConfigError> {
     if value.trim().is_empty() {
         return Err(ConfigError::missing_required(field));
@@ -248,6 +344,30 @@ fn default_host() -> IpAddr {
 
 fn default_port() -> u16 {
     8080
+}
+
+fn default_database_min_connections() -> u32 {
+    1
+}
+
+fn default_database_ssl_mode() -> DatabaseSslMode {
+    DatabaseSslMode::Prefer
+}
+
+fn default_database_max_connections() -> u32 {
+    10
+}
+
+fn default_database_acquire_timeout_seconds() -> u64 {
+    10
+}
+
+fn default_database_idle_timeout_seconds() -> u64 {
+    600
+}
+
+fn default_database_max_lifetime_seconds() -> u64 {
+    1_800
 }
 
 fn default_jwt_issuer() -> String {

@@ -1,0 +1,2 @@
+-- Initial migration placeholder for the backend schema.
+-- Future issues will replace this empty baseline with concrete tables.
