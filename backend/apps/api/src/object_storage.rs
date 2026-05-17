@@ -8,6 +8,7 @@ use aws_sdk_s3::{
     Client,
     config::Builder as S3ConfigBuilder,
     error::SdkError,
+    primitives::ByteStream,
     presigning::PresigningConfig,
 };
 use tracing::info;
@@ -114,6 +115,62 @@ impl ObjectStorageClient {
         Ok(())
     }
 
+    pub async fn get_object_bytes(
+        &self,
+        key: &str,
+    ) -> Result<Option<ObjectBody>, ObjectStorageError> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
+
+        match response {
+            Ok(output) => {
+                let content_type = output.content_type().map(ToOwned::to_owned);
+                let body = output
+                    .body
+                    .collect()
+                    .await
+                    .map_err(|error| ObjectStorageError::GetObject(error.to_string()))?;
+
+                Ok(Some(ObjectBody {
+                    key: key.to_owned(),
+                    bytes: body.into_bytes().to_vec(),
+                    content_type,
+                }))
+            }
+            Err(SdkError::ServiceError(service_error))
+                if service_error.err().is_no_such_key()
+                    || service_error.raw().status().as_u16() == 404 =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(ObjectStorageError::GetObject(error.to_string())),
+        }
+    }
+
+    pub async fn put_object_bytes(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> Result<(), ObjectStorageError> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .content_type(content_type)
+            .body(ByteStream::from(bytes))
+            .send()
+            .await
+            .map_err(|error| ObjectStorageError::PutObject(error.to_string()))?;
+
+        Ok(())
+    }
+
     pub async fn head_object(
         &self,
         key: &str,
@@ -191,11 +248,20 @@ pub struct ObjectMetadata {
     pub public_url: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ObjectBody {
+    pub key: String,
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum ObjectStorageError {
     InvalidPresignExpiry(String),
     Presign(String),
     DeleteObject(String),
+    GetObject(String),
+    PutObject(String),
     HeadObject(String),
 }
 
@@ -205,6 +271,8 @@ impl fmt::Display for ObjectStorageError {
             Self::InvalidPresignExpiry(message) => formatter.write_str(message),
             Self::Presign(error) => write!(formatter, "failed to presign object storage request: {error}"),
             Self::DeleteObject(error) => write!(formatter, "failed to delete object from storage: {error}"),
+            Self::GetObject(error) => write!(formatter, "failed to fetch object from storage: {error}"),
+            Self::PutObject(error) => write!(formatter, "failed to upload object to storage: {error}"),
             Self::HeadObject(error) => write!(formatter, "failed to read object metadata from storage: {error}"),
         }
     }
