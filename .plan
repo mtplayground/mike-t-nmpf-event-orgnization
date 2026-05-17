@@ -1,0 +1,106 @@
+ZeroClaw architecture plan
+
+Repository shape
+- Use a Rust workspace plus a frontend app directory.
+- Top-level layout:
+  - `Cargo.toml`: workspace root for backend crates and shared Rust crates.
+  - `apps/api`: Axum server, routing, middleware, config bootstrap, background jobs.
+  - `apps/web`: frontend SPA with routing, auth flows, host dashboard, attendee flows, Playwright setup.
+  - `crates/domain`: core entities, DTOs, validation helpers, business enums.
+  - `crates/auth`: password hashing, JWT helpers, auth-specific types.
+  - `crates/storage`: S3 wrapper, presign helpers, image file metadata types.
+  - `crates/email`: SMTP sender, template builders, shared mail payloads.
+  - `crates/db`: sqlx pool setup, migrations glue, repository traits and implementations.
+  - `migrations`: sqlx migrations for users, tokens, images, events, registrations.
+  - `deploy`: packaging, environment templates, runbook assets.
+
+Backend module structure
+- `apps/api/src/main.rs`: startup, tracing, config load, router build.
+- `apps/api/src/app.rs`: application state and dependency wiring.
+- `apps/api/src/config.rs`: typed environment loader.
+- `apps/api/src/http/`
+  - `routes.rs`: top-level router composition.
+  - `response.rs`: API envelope and error serialization.
+  - `middleware/`: auth, request-id, validation, logging.
+  - `extractors/`: `CurrentUser`, pagination/filter query extractors.
+- `apps/api/src/features/`
+  - `auth/`: register, verify, login, refresh, logout, reset.
+  - `profile/`: profile read/update, avatar presign.
+  - `events/`: event CRUD, host lists, public lists/detail, cover image flows.
+  - `registrations/`: register/cancel, attendee dashboard, host attendee list/export.
+  - `notifications/`: announcement and reminder job entrypoints.
+- `apps/api/src/jobs/`: scheduled tasks and worker orchestration.
+- `apps/api/tests/`: integration tests by feature area.
+
+Frontend module structure
+- `apps/web/src/app/`: router, providers, theme bootstrap.
+- `apps/web/src/lib/`
+  - `api.ts`: typed HTTP client.
+  - `auth.ts`: auth context and token lifecycle integration.
+  - `query.ts`: query client setup.
+  - `validation.ts`: client-side schema reuse where practical.
+- `apps/web/src/pages/`
+  - auth, profile, host dashboard, event form, discovery feed, event detail, attendee dashboard, attendees management.
+- `apps/web/src/components/`
+  - forms, uploaders, loading/empty/error states, tables, announcement composer.
+- `apps/web/e2e/`: Playwright suites.
+
+Shared types and contracts
+- Keep HTTP request/response DTOs in `crates/domain` and mirror them in TypeScript via generated OpenAPI or hand-maintained types if generation overhead is too high early on.
+- Standard API error shape:
+  - `code`: stable machine-readable identifier.
+  - `message`: user-safe summary.
+  - `fields`: optional validation field map.
+  - `request_id`: trace correlation.
+- Core entities:
+  - `User`, `Profile`, `RefreshToken`, `EventImage`, `Event`, `Registration`.
+- Shared enums:
+  - `UserRole`, `EventStatus`, `RegistrationStatus`, `ImageKind`.
+
+Data model direction
+- `users`: identity, email verification, profile fields, password hash.
+- `refresh_tokens`: hashed token family records for rotation and revocation.
+- `event_images`: uploaded object metadata, ownership, thumbnail info.
+- `events`: host ownership, title/description, cover image ref, capacity, schedule, publish/cancel status.
+- `registrations`: unique `(event_id, user_id)` with state transitions and timestamps.
+
+Key design decisions
+- Backend-first delivery for contracts and security-critical paths; frontend follows stable endpoints.
+- Use service/repository boundaries so business logic is testable without HTTP.
+- Store refresh tokens hashed, not plaintext; use token families for rotation and replay detection.
+- Use presigned uploads for avatars and covers, but keep server-side validation/thumbnail generation authoritative.
+- Enforce event capacity atomically in SQL transactions, not application memory.
+- Treat emails and reminder jobs as adapters around domain events to keep core flows deterministic.
+- Use structured logging and request IDs from the start so error review in issue #46 is refinement, not a retrofit.
+
+Issue dependency map
+- Foundation:
+  - #1 -> #2 -> #3 -> #4 -> #5 -> #6 -> #7
+- Auth base:
+  - #8 -> #9 -> #10 -> #11 -> #12 -> #13 -> #14 -> #15 -> #16 -> #17
+- Profile:
+  - #15 + #18 -> #19 -> #20
+- Event media and events:
+  - #5 + #21 -> #22 -> #23
+  - #18 + #21 -> #24 -> #25 -> #26 -> #27 -> #28 -> #29
+- Public discovery:
+  - #24 -> #30 -> #31 -> #32 -> #33
+- Registrations and messaging:
+  - #24 + #34 -> #35 -> #36 -> #37 -> #38 -> #39 -> #40 -> #41 -> #42 -> #43 -> #44
+- Quality and release:
+  - #17 + #29 + #44 + frontend flows -> #45
+  - #7 + accumulated backend behavior -> #46
+  - #16 + #20 + #27 + #32 + #33 + #41 + #42 + #43 -> #47
+  - stable app build and runtime config -> #48
+
+Recommended implementation cadence
+- Phase 1: foundation and platform setup (#1-#7).
+- Phase 2: auth and identity (#8-#20).
+- Phase 3: event creation and discovery (#21-#33).
+- Phase 4: registrations, notifications, host operations (#34-#44).
+- Phase 5: end-to-end hardening and deployment (#45-#48).
+
+Notes for future sessions
+- Keep each issue narrowly scoped to one mergeable increment.
+- Prefer adding migrations and DTOs before handlers/UI that depend on them.
+- Do not couple frontend progress to unfinished backend endpoints; use issue ordering to keep interfaces stable.
