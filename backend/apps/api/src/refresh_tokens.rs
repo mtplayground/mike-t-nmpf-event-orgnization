@@ -62,16 +62,7 @@ impl RefreshTokenService {
             .await?
             .ok_or(RefreshTokenError::RefreshTokenNotFound)?;
 
-        if existing.user_id != claims.subject {
-            return Err(RefreshTokenError::TokenSubjectMismatch {
-                expected: existing.user_id,
-                actual: claims.subject,
-            });
-        }
-
-        if existing.revoked_at.is_some() {
-            return Err(RefreshTokenError::RefreshTokenRevoked);
-        }
+        validate_rotation_record(&existing, claims.subject, now)?;
 
         if existing.expires_at <= now {
             revoke_refresh_token(&mut *transaction, &existing.token_hash, now).await?;
@@ -290,9 +281,35 @@ where
     Ok(())
 }
 
+fn validate_rotation_record(
+    existing: &RefreshTokenRecord,
+    claim_subject: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), RefreshTokenError> {
+    if existing.user_id != claim_subject {
+        return Err(RefreshTokenError::TokenSubjectMismatch {
+            expected: existing.user_id,
+            actual: claim_subject,
+        });
+    }
+
+    if existing.revoked_at.is_some() {
+        return Err(RefreshTokenError::RefreshTokenRevoked);
+    }
+
+    if existing.expires_at <= now {
+        return Err(RefreshTokenError::RefreshTokenExpired);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hash_refresh_token;
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    use super::{RefreshTokenError, RefreshTokenRecord, hash_refresh_token, validate_rotation_record};
 
     #[test]
     fn refresh_token_hash_is_deterministic() {
@@ -309,5 +326,63 @@ mod tests {
         let second = hash_refresh_token("different-refresh-token-value");
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn validate_rotation_record_accepts_active_token() {
+        let user_id = Uuid::new_v4();
+        let record = build_record(user_id);
+
+        let result = validate_rotation_record(&record, user_id, Utc::now());
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_rotation_record_rejects_subject_mismatch() {
+        let record = build_record(Uuid::new_v4());
+        let error = validate_rotation_record(&record, Uuid::new_v4(), Utc::now())
+            .expect_err("mismatched subject should fail");
+
+        assert!(matches!(
+            error,
+            RefreshTokenError::TokenSubjectMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rotation_record_rejects_revoked_token() {
+        let user_id = Uuid::new_v4();
+        let mut record = build_record(user_id);
+        record.revoked_at = Some(Utc::now());
+
+        let error = validate_rotation_record(&record, user_id, Utc::now())
+            .expect_err("revoked token should fail");
+
+        assert!(matches!(error, RefreshTokenError::RefreshTokenRevoked));
+    }
+
+    #[test]
+    fn validate_rotation_record_rejects_expired_token() {
+        let user_id = Uuid::new_v4();
+        let mut record = build_record(user_id);
+        record.expires_at = Utc::now() - Duration::minutes(1);
+
+        let error = validate_rotation_record(&record, user_id, Utc::now())
+            .expect_err("expired token should fail");
+
+        assert!(matches!(error, RefreshTokenError::RefreshTokenExpired));
+    }
+
+    fn build_record(user_id: Uuid) -> RefreshTokenRecord {
+        let now = Utc::now();
+
+        RefreshTokenRecord {
+            token_hash: "token-hash".to_owned(),
+            user_id,
+            expires_at: now + Duration::minutes(30),
+            revoked_at: None,
+            created_at: now,
+        }
     }
 }

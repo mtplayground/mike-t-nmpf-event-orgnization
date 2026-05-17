@@ -337,6 +337,29 @@ mod tests {
     }
 
     #[test]
+    fn refresh_token_round_trip_succeeds() {
+        let service = match JwtService::from_config(&jwt_config()) {
+            Ok(service) => service,
+            Err(error) => panic!("jwt service should initialize: {error}"),
+        };
+        let user_id = Uuid::new_v4();
+
+        let token = match service.issue_refresh_token(user_id) {
+            Ok(token) => token,
+            Err(error) => panic!("refresh token issuance should succeed: {error}"),
+        };
+
+        let claims = match service.verify_refresh_token(&token.token) {
+            Ok(claims) => claims,
+            Err(error) => panic!("refresh token verification should succeed: {error}"),
+        };
+
+        assert_eq!(claims.subject, user_id);
+        assert_eq!(claims.token_type, TokenKind::Refresh);
+        assert_eq!(claims.issuer, "event-organization-api");
+    }
+
+    #[test]
     fn refresh_token_is_rejected_by_access_verifier() {
         let mut config = jwt_config();
         config.refresh_secret = config.access_secret.clone();
@@ -353,6 +376,31 @@ mod tests {
 
         let error = match service.verify_access_token(&token.token) {
             Ok(_) => panic!("refresh token should not verify as access token"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("unexpected token kind"));
+    }
+
+    #[test]
+    fn access_token_is_rejected_by_refresh_verifier() {
+        let mut config = jwt_config();
+        config.refresh_secret = config.access_secret.clone();
+
+        let service = match JwtService::from_config(&config) {
+            Ok(service) => service,
+            Err(error) => panic!("jwt service should initialize: {error}"),
+        };
+
+        let token = match service.issue_access_token(Uuid::new_v4()) {
+            Ok(token) => token,
+            Err(error) => panic!("access token issuance should succeed: {error}"),
+        };
+
+        let error = match service.verify_refresh_token(&token.token) {
+            Ok(_) => panic!("access token should not verify as refresh token"),
             Err(error) => error,
         };
 
