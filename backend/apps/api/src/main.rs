@@ -2,6 +2,7 @@ mod app;
 mod auth;
 mod config;
 mod database;
+mod email;
 mod email_verification;
 mod error;
 mod extract;
@@ -25,6 +26,7 @@ async fn main() -> Result<(), io::Error> {
     let password_service = auth::PasswordService::new().map_err(io::Error::other)?;
     let jwt_service = auth::JwtService::from_config(&config.jwt).map_err(io::Error::other)?;
     let refresh_token_service = refresh_tokens::RefreshTokenService::new(jwt_service.clone());
+    let email_service = email::EmailService::spawn(&config.smtp).map_err(io::Error::other)?;
     let email_verification_service = email_verification::EmailVerificationService::new();
     let password_reset_service = password_reset::PasswordResetService::new();
     let db_pool = database::connect(&config.database)
@@ -39,6 +41,7 @@ async fn main() -> Result<(), io::Error> {
         password_service,
         jwt_service,
         refresh_token_service,
+        email_service,
         email_verification_service,
         password_reset_service,
         login_rate_limiter: Arc::new(app::LoginRateLimiter::new()),
