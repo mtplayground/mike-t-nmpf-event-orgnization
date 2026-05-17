@@ -225,3 +225,33 @@ pub async fn update_profile(
     .fetch_optional(pool)
     .await
 }
+
+pub async fn update_avatar_object_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    avatar_object_key: Option<&str>,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET
+            avatar_object_key = $2,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING
+            id,
+            email,
+            password_hash,
+            display_name,
+            avatar_object_key,
+            bio,
+            email_verified_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(avatar_object_key)
+    .fetch_optional(pool)
+    .await
+}
