@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -8,6 +8,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use http::{HeaderValue, Method};
+use image::{DynamicImage, GenericImageView, ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -36,8 +37,10 @@ use crate::{
 
 const AVATAR_UPLOAD_MAX_SIZE_BYTES: i64 = 5 * 1024 * 1024;
 const AVATAR_UPLOAD_URL_TTL_SECONDS: u64 = 900;
-const EVENT_COVER_UPLOAD_MAX_SIZE_BYTES: i64 = 10 * 1024 * 1024;
+const EVENT_COVER_SOURCE_MAX_SIZE_BYTES: i64 = 10 * 1024 * 1024;
 const EVENT_COVER_UPLOAD_URL_TTL_SECONDS: u64 = 900;
+const EVENT_COVER_HERO_MAX_WIDTH: u32 = 1200;
+const EVENT_COVER_THUMBNAIL_MAX_WIDTH: u32 = 480;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -259,6 +262,12 @@ struct ConfirmEventCoverUploadRequest {
 #[derive(Debug, Serialize)]
 struct ConfirmEventCoverUploadResponse {
     event_id: Uuid,
+    hero: ProcessedEventImageResponse,
+    thumbnail: ProcessedEventImageResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct ProcessedEventImageResponse {
     object_key: String,
     variant: &'static str,
     width: i32,
@@ -692,7 +701,7 @@ async fn create_event_cover_upload_url(
     payload: ValidatedJson<EventCoverUploadUrlRequest>,
 ) -> Result<Json<ApiResponse<EventCoverUploadUrlResponse>>, AppError> {
     let content_type = normalize_image_content_type(payload.content_type.trim())?;
-    validate_cover_size(payload.size_bytes)?;
+    validate_cover_source_size(payload.size_bytes)?;
 
     let object_key = build_event_cover_object_key(event_id, current_user.id, content_type);
     let presigned = state
@@ -717,7 +726,7 @@ async fn create_event_cover_upload_url(
             .map(|(name, value)| PresignedHeader { name, value })
             .collect(),
         expires_in_seconds: presigned.expires_in.as_secs(),
-        max_size_bytes: EVENT_COVER_UPLOAD_MAX_SIZE_BYTES,
+        max_size_bytes: EVENT_COVER_SOURCE_MAX_SIZE_BYTES,
     })))
 }
 
@@ -729,38 +738,107 @@ async fn confirm_event_cover_upload(
 ) -> Result<Json<ApiResponse<ConfirmEventCoverUploadResponse>>, AppError> {
     let object_key = payload.object_key.trim();
     ensure_event_cover_key_is_owned(event_id, current_user.id, object_key)?;
-    validate_positive_dimensions(payload.width, payload.height)?;
+    let existing_images = event_images::find_event_images_by_event_id(&state.db_pool, event_id)
+        .await
+        .map_err(AppError::from)?;
 
-    let metadata = state
+    let source_object = state
         .object_storage
-        .head_object(object_key)
+        .get_object_bytes(object_key)
         .await
         .map_err(map_object_storage_error)?
         .ok_or_else(|| AppError::bad_request("uploaded event cover object was not found"))?;
 
-    validate_confirmed_cover_metadata(&metadata)?;
-
-    let image = event_images::upsert_event_image(
-        &state.db_pool,
+    let processed = process_event_cover_upload(
         event_id,
-        object_key,
-        EventImageVariant::Hero,
+        current_user.id,
+        &source_object,
         payload.width,
         payload.height,
-        metadata
-            .content_length
-            .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content length"))?,
+    )?;
+
+    state
+        .object_storage
+        .put_object_bytes(
+            &processed.hero.object_key,
+            processed.hero.bytes.clone(),
+            processed.hero.content_type,
+        )
+        .await
+        .map_err(map_object_storage_error)?;
+
+    if let Err(error) = state
+        .object_storage
+        .put_object_bytes(
+            &processed.thumbnail.object_key,
+            processed.thumbnail.bytes.clone(),
+            processed.thumbnail.content_type,
+        )
+        .await
+    {
+        let _ = state
+            .object_storage
+            .delete_object(&processed.hero.object_key)
+            .await;
+        return Err(map_object_storage_error(error));
+    }
+
+    let hero_record = match event_images::upsert_event_image(
+        &state.db_pool,
+        event_id,
+        &processed.hero.object_key,
+        EventImageVariant::Hero,
+        processed.hero.width,
+        processed.hero.height,
+        processed.hero.size_bytes,
     )
     .await
-    .map_err(AppError::from)?;
+    {
+        Ok(record) => record,
+        Err(error) => {
+            cleanup_uploaded_cover_variants(&state, &processed).await;
+            return Err(AppError::from(error));
+        }
+    };
+
+    let thumbnail_record = match event_images::upsert_event_image(
+        &state.db_pool,
+        event_id,
+        &processed.thumbnail.object_key,
+        EventImageVariant::Thumbnail,
+        processed.thumbnail.width,
+        processed.thumbnail.height,
+        processed.thumbnail.size_bytes,
+    )
+    .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            cleanup_uploaded_cover_variants(&state, &processed).await;
+            return Err(AppError::from(error));
+        }
+    };
+
+    cleanup_replaced_event_images(&state, &existing_images, &processed).await;
+
+    let _ = state.object_storage.delete_object(object_key).await;
 
     Ok(Json(ApiResponse::new(ConfirmEventCoverUploadResponse {
-        event_id: image.event_id,
-        object_key: image.object_key,
-        variant: image.variant.as_str(),
-        width: image.width,
-        height: image.height,
-        bytes: image.bytes,
+        event_id,
+        hero: ProcessedEventImageResponse {
+            object_key: hero_record.object_key,
+            variant: hero_record.variant.as_str(),
+            width: hero_record.width,
+            height: hero_record.height,
+            bytes: hero_record.bytes,
+        },
+        thumbnail: ProcessedEventImageResponse {
+            object_key: thumbnail_record.object_key,
+            variant: thumbnail_record.variant.as_str(),
+            width: thumbnail_record.width,
+            height: thumbnail_record.height,
+            bytes: thumbnail_record.bytes,
+        },
     })))
 }
 
@@ -911,6 +989,17 @@ fn build_event_cover_object_key(
     format!("events/{event_id}/covers/{user_id}/hero-{}.{}", Uuid::new_v4(), extension)
 }
 
+fn build_processed_event_cover_object_key(
+    event_id: Uuid,
+    variant: EventImageVariant,
+) -> String {
+    format!(
+        "events/{event_id}/images/{}-{}.png",
+        variant.as_str(),
+        Uuid::new_v4()
+    )
+}
+
 fn file_extension_for_content_type(content_type: &str) -> &'static str {
     match content_type {
         "image/jpeg" => "jpg",
@@ -949,14 +1038,14 @@ fn validate_avatar_size(size_bytes: i64) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_cover_size(size_bytes: i64) -> Result<(), AppError> {
+fn validate_cover_source_size(size_bytes: i64) -> Result<(), AppError> {
     if size_bytes <= 0 {
         return Err(AppError::bad_request("size_bytes must be greater than zero"));
     }
 
-    if size_bytes > EVENT_COVER_UPLOAD_MAX_SIZE_BYTES {
+    if size_bytes > EVENT_COVER_SOURCE_MAX_SIZE_BYTES {
         return Err(AppError::bad_request(format!(
-            "size_bytes cannot exceed {EVENT_COVER_UPLOAD_MAX_SIZE_BYTES}"
+            "size_bytes cannot exceed {EVENT_COVER_SOURCE_MAX_SIZE_BYTES}"
         )));
     }
 
@@ -1010,27 +1099,6 @@ fn validate_confirmed_avatar_metadata(metadata: &ObjectMetadata) -> Result<(), A
     Ok(())
 }
 
-fn validate_confirmed_cover_metadata(metadata: &ObjectMetadata) -> Result<(), AppError> {
-    let content_type = metadata
-        .content_type
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content type"))?;
-    let normalized_content_type = normalize_image_content_type(content_type)?;
-    let content_length = metadata
-        .content_length
-        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content length"))?;
-
-    validate_cover_size(content_length)?;
-
-    if normalized_content_type != content_type {
-        return Err(AppError::bad_request(
-            "uploaded event cover object content type does not match the allowed set",
-        ));
-    }
-
-    Ok(())
-}
-
 fn validate_positive_dimensions(width: i32, height: i32) -> Result<(), AppError> {
     if width <= 0 {
         return Err(AppError::bad_request("width must be greater than zero"));
@@ -1041,6 +1109,163 @@ fn validate_positive_dimensions(width: i32, height: i32) -> Result<(), AppError>
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct ProcessedEventCoverUpload {
+    hero: ProcessedEventImage,
+    thumbnail: ProcessedEventImage,
+}
+
+#[derive(Debug)]
+struct ProcessedEventImage {
+    object_key: String,
+    content_type: &'static str,
+    bytes: Vec<u8>,
+    width: i32,
+    height: i32,
+    size_bytes: i64,
+}
+
+fn process_event_cover_upload(
+    event_id: Uuid,
+    user_id: Uuid,
+    source_object: &crate::object_storage::ObjectBody,
+    reported_width: i32,
+    reported_height: i32,
+) -> Result<ProcessedEventCoverUpload, AppError> {
+    ensure_event_cover_key_is_owned(event_id, user_id, &source_object.key)?;
+    validate_positive_dimensions(reported_width, reported_height)?;
+    validate_cover_source_size(source_object.bytes.len() as i64)?;
+
+    let source_content_type = source_object
+        .content_type
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content type"))?;
+    let normalized_content_type = normalize_image_content_type(source_content_type)?;
+    let format = image::guess_format(&source_object.bytes)
+        .map_err(|error| AppError::bad_request(format!("unable to detect uploaded image format: {error}")))?;
+    let detected_content_type = content_type_for_image_format(format)
+        .ok_or_else(|| AppError::bad_request("uploaded event cover image format is not supported"))?;
+
+    if detected_content_type != normalized_content_type {
+        return Err(AppError::bad_request(
+            "uploaded event cover object content type does not match the detected image format",
+        ));
+    }
+
+    let image = image::load_from_memory_with_format(&source_object.bytes, format)
+        .map_err(|error| AppError::bad_request(format!("failed to decode uploaded event cover image: {error}")))?;
+    let (actual_width, actual_height) = image.dimensions();
+
+    if actual_width == 0 || actual_height == 0 {
+        return Err(AppError::bad_request(
+            "uploaded event cover image has invalid dimensions",
+        ));
+    }
+
+    if actual_width as i32 != reported_width || actual_height as i32 != reported_height {
+        return Err(AppError::bad_request(
+            "reported event cover dimensions do not match the uploaded image",
+        ));
+    }
+
+    let hero = build_processed_event_image(
+        event_id,
+        EventImageVariant::Hero,
+        &image,
+        EVENT_COVER_HERO_MAX_WIDTH,
+    )?;
+    let thumbnail = build_processed_event_image(
+        event_id,
+        EventImageVariant::Thumbnail,
+        &image,
+        EVENT_COVER_THUMBNAIL_MAX_WIDTH,
+    )?;
+
+    Ok(ProcessedEventCoverUpload { hero, thumbnail })
+}
+
+fn build_processed_event_image(
+    event_id: Uuid,
+    variant: EventImageVariant,
+    image: &DynamicImage,
+    max_width: u32,
+) -> Result<ProcessedEventImage, AppError> {
+    let resized = resize_for_max_width(image, max_width);
+    let (width, height) = resized.dimensions();
+    let bytes = encode_png_image(&resized)?;
+    let size_bytes = bytes.len() as i64;
+    let width = i32::try_from(width)
+        .map_err(|_| AppError::internal("generated image width exceeded supported range"))?;
+    let height = i32::try_from(height)
+        .map_err(|_| AppError::internal("generated image height exceeded supported range"))?;
+
+    Ok(ProcessedEventImage {
+        object_key: build_processed_event_cover_object_key(event_id, variant),
+        content_type: "image/png",
+        bytes,
+        width,
+        height,
+        size_bytes,
+    })
+}
+
+fn resize_for_max_width(image: &DynamicImage, max_width: u32) -> DynamicImage {
+    if image.width() <= max_width {
+        return image.clone();
+    }
+
+    image.resize(max_width, u32::MAX, FilterType::Lanczos3)
+}
+
+fn encode_png_image(image: &DynamicImage) -> Result<Vec<u8>, AppError> {
+    let mut buffer = Cursor::new(Vec::new());
+    image
+        .write_to(&mut buffer, ImageFormat::Png)
+        .map_err(|error| AppError::internal(format!("failed to encode processed event image: {error}")))?;
+
+    Ok(buffer.into_inner())
+}
+
+fn content_type_for_image_format(format: ImageFormat) -> Option<&'static str> {
+    match format {
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::WebP => Some("image/webp"),
+        _ => None,
+    }
+}
+
+async fn cleanup_uploaded_cover_variants(
+    state: &SharedAppState,
+    processed: &ProcessedEventCoverUpload,
+) {
+    let _ = state
+        .object_storage
+        .delete_object(&processed.hero.object_key)
+        .await;
+    let _ = state
+        .object_storage
+        .delete_object(&processed.thumbnail.object_key)
+        .await;
+}
+
+async fn cleanup_replaced_event_images(
+    state: &SharedAppState,
+    existing_images: &[event_images::EventImage],
+    processed: &ProcessedEventCoverUpload,
+) {
+    for image in existing_images {
+        let keep_key = match image.variant {
+            EventImageVariant::Hero => &processed.hero.object_key,
+            EventImageVariant::Thumbnail => &processed.thumbnail.object_key,
+        };
+
+        if image.object_key != *keep_key {
+            let _ = state.object_storage.delete_object(&image.object_key).await;
+        }
+    }
 }
 
 fn map_email_verification_error(error: EmailVerificationError) -> AppError {

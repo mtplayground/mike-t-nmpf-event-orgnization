@@ -66,6 +66,30 @@ impl fmt::Display for EventImageVariantParseError {
 
 impl std::error::Error for EventImageVariantParseError {}
 
+pub async fn find_event_images_by_event_id(
+    pool: &PgPool,
+    event_id: Uuid,
+) -> Result<Vec<EventImage>, sqlx::Error> {
+    sqlx::query_as::<_, EventImage>(
+        r#"
+        SELECT
+            id,
+            event_id,
+            object_key,
+            variant,
+            width,
+            height,
+            bytes,
+            created_at
+        FROM event_images
+        WHERE event_id = $1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn upsert_event_image(
     pool: &PgPool,
     event_id: Uuid,
