@@ -40,6 +40,56 @@ export async function requestJson<T>(
   return payload.data;
 }
 
+export type UploadRequestHeader = {
+  name: string;
+  value: string;
+};
+
+export async function uploadFileWithProgress(options: {
+  url: string;
+  method?: string;
+  file: File;
+  headers?: UploadRequestHeader[];
+  onProgress?: (progress: number) => void;
+}) {
+  const { file, headers = [], method = 'PUT', onProgress, url } = options;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+
+    request.open(method, url, true);
+
+    for (const header of headers) {
+      request.setRequestHeader(header.name, header.value);
+    }
+
+    request.upload.addEventListener('progress', (event) => {
+      if (!onProgress || !event.lengthComputable) {
+        return;
+      }
+
+      const progress = Math.round((event.loaded / event.total) * 100);
+      onProgress(progress);
+    });
+
+    request.addEventListener('load', () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress?.(100);
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Upload failed with ${request.status}`));
+    });
+
+    request.addEventListener('error', () => {
+      reject(new Error('Upload failed due to a network error'));
+    });
+
+    request.send(file);
+  });
+}
+
 async function safeParseJson(response: Response) {
   try {
     return await response.json();
