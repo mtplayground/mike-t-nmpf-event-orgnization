@@ -70,3 +70,116 @@ where
             .ok_or_else(|| AppError::unauthorized("authentication is required"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        extract::{FromRequest, FromRequestParts, Request},
+        http::request::Parts,
+    };
+    use chrono::Utc;
+    use serde::Deserialize;
+    use uuid::Uuid;
+    use validator::Validate;
+
+    use super::{CurrentUser, ValidatedJson};
+    use crate::{error::AppError, users::AuthUserContext};
+
+    #[derive(Debug, Deserialize, Validate)]
+    struct ValidationPayload {
+        #[validate(length(min = 3, message = "name must be at least 3 characters"))]
+        name: String,
+    }
+
+    #[tokio::test]
+    async fn validated_json_accepts_valid_payload() {
+        let request = json_request(r#"{"name":"valid-name"}"#);
+
+        let payload = ValidatedJson::<ValidationPayload>::from_request(request, &())
+            .await
+            .expect("valid payload should pass validation");
+
+        assert_eq!(payload.name, "valid-name");
+    }
+
+    #[tokio::test]
+    async fn validated_json_rejects_invalid_payload() {
+        let request = json_request(r#"{"name":"no"}"#);
+
+        let error = match ValidatedJson::<ValidationPayload>::from_request(request, &()).await {
+            Ok(_) => panic!("short value should fail validation"),
+            Err(error) => error,
+        };
+
+        match error {
+            AppError::Validation(errors) => {
+                let field_errors = errors.field_errors();
+                let messages = field_errors
+                    .get("name")
+                    .expect("name field should have a validation error");
+
+                assert_eq!(messages.len(), 1);
+            }
+            other => panic!("expected validation error, received {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validated_json_rejects_malformed_json() {
+        let request = json_request(r#"{"name":}"#);
+
+        let error = match ValidatedJson::<ValidationPayload>::from_request(request, &()).await {
+            Ok(_) => panic!("malformed json should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, AppError::Json(_)));
+    }
+
+    #[tokio::test]
+    async fn current_user_reads_user_from_extensions() {
+        let user = AuthUserContext {
+            id: Uuid::new_v4(),
+            email: "user@example.com".to_owned(),
+            display_name: "Example User".to_owned(),
+            email_verified_at: Some(Utc::now()),
+        };
+        let mut parts = request_parts();
+        parts.extensions.insert(user.clone());
+
+        let current_user = CurrentUser::from_request_parts(&mut parts, &())
+            .await
+            .expect("current user should extract from request extensions");
+
+        assert_eq!(current_user.id, user.id);
+        assert_eq!(current_user.email, user.email);
+    }
+
+    #[tokio::test]
+    async fn current_user_requires_auth_extension() {
+        let mut parts = request_parts();
+
+        let error = CurrentUser::from_request_parts(&mut parts, &())
+            .await
+            .expect_err("missing extension should be unauthorized");
+
+        assert!(matches!(error, AppError::Unauthorized { .. }));
+    }
+
+    fn json_request(body: &str) -> Request {
+        Request::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .expect("request should build")
+    }
+
+    fn request_parts() -> Parts {
+        let request = Request::builder()
+            .body(Body::empty())
+            .expect("request should build");
+
+        let (parts, _) = request.into_parts();
+        parts
+    }
+}
