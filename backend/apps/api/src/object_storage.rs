@@ -58,12 +58,17 @@ impl ObjectStorageClient {
         &self,
         key: &str,
         content_type: Option<&str>,
+        content_length: Option<i64>,
         expires_in: Duration,
     ) -> Result<PresignedRequest, ObjectStorageError> {
         let mut request = self.client.put_object().bucket(&self.bucket).key(key);
 
         if let Some(content_type) = content_type {
             request = request.content_type(content_type);
+        }
+
+        if let Some(content_length) = content_length {
+            request = request.content_length(content_length);
         }
 
         let presigned_request = request

@@ -24,8 +24,12 @@ use crate::{
     extract::{CurrentUser, ValidatedJson},
     password_reset::{PasswordResetError, PasswordResetService},
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
+    object_storage::{ObjectMetadata, ObjectStorageError},
     users::{self, NewUser},
 };
+
+const AVATAR_UPLOAD_MAX_SIZE_BYTES: i64 = 5 * 1024 * 1024;
+const AVATAR_UPLOAD_URL_TTL_SECONDS: u64 = 900;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -189,10 +193,41 @@ struct UpdateProfileRequest {
     bio: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+struct AvatarUploadUrlRequest {
+    #[validate(length(min = 1, max = 128, message = "content_type must be provided"))]
+    content_type: String,
+    size_bytes: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AvatarUploadUrlResponse {
+    object_key: String,
+    method: String,
+    upload_url: String,
+    headers: Vec<PresignedHeader>,
+    expires_in_seconds: u64,
+    max_size_bytes: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct PresignedHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct ConfirmAvatarUploadRequest {
+    #[validate(length(min = 1, max = 512, message = "object_key must be provided"))]
+    object_key: String,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
+        .route("/me/avatar/upload-url", post(create_avatar_upload_url))
+        .route("/me/avatar/confirm", post(confirm_avatar_upload))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::require_current_user,
@@ -545,6 +580,65 @@ async fn update_profile(
     Ok(Json(ApiResponse::new(build_current_user_response(&user))))
 }
 
+async fn create_avatar_upload_url(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<AvatarUploadUrlRequest>,
+) -> Result<Json<ApiResponse<AvatarUploadUrlResponse>>, AppError> {
+    let content_type = normalize_avatar_content_type(payload.content_type.trim())?;
+    validate_avatar_size(payload.size_bytes)?;
+
+    let object_key = build_avatar_object_key(current_user.id, content_type);
+    let presigned = state
+        .object_storage
+        .put_presigned_url(
+            &object_key,
+            Some(content_type),
+            Some(payload.size_bytes),
+            std::time::Duration::from_secs(AVATAR_UPLOAD_URL_TTL_SECONDS),
+        )
+        .await
+        .map_err(map_object_storage_error)?;
+
+    Ok(Json(ApiResponse::new(AvatarUploadUrlResponse {
+        object_key,
+        method: presigned.method,
+        upload_url: presigned.uri,
+        headers: presigned
+            .headers
+            .into_iter()
+            .map(|(name, value)| PresignedHeader { name, value })
+            .collect(),
+        expires_in_seconds: presigned.expires_in.as_secs(),
+        max_size_bytes: AVATAR_UPLOAD_MAX_SIZE_BYTES,
+    })))
+}
+
+async fn confirm_avatar_upload(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<ConfirmAvatarUploadRequest>,
+) -> Result<Json<ApiResponse<CurrentUserResponse>>, AppError> {
+    let object_key = payload.object_key.trim();
+    ensure_avatar_key_belongs_to_user(current_user.id, object_key)?;
+
+    let metadata = state
+        .object_storage
+        .head_object(object_key)
+        .await
+        .map_err(map_object_storage_error)?
+        .ok_or_else(|| AppError::bad_request("uploaded avatar object was not found"))?;
+
+    validate_confirmed_avatar_metadata(&metadata)?;
+
+    let user = users::update_avatar_object_key(&state.db_pool, current_user.id, Some(object_key))
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_current_user_response(&user))))
+}
+
 async fn forgot_password(
     State(state): State<SharedAppState>,
     payload: ValidatedJson<ForgotPasswordRequest>,
@@ -671,6 +765,73 @@ fn build_current_user_response(user: &users::User) -> CurrentUserResponse {
     }
 }
 
+fn build_avatar_object_key(user_id: Uuid, content_type: &str) -> String {
+    let extension = match content_type {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "bin",
+    };
+
+    format!("avatars/{user_id}/{}.{}", Uuid::new_v4(), extension)
+}
+
+fn normalize_avatar_content_type(content_type: &str) -> Result<&'static str, AppError> {
+    match content_type.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => Ok("image/jpeg"),
+        "image/png" => Ok("image/png"),
+        "image/webp" => Ok("image/webp"),
+        _ => Err(AppError::bad_request(
+            "content_type must be one of image/jpeg, image/png, or image/webp",
+        )),
+    }
+}
+
+fn validate_avatar_size(size_bytes: i64) -> Result<(), AppError> {
+    if size_bytes <= 0 {
+        return Err(AppError::bad_request("size_bytes must be greater than zero"));
+    }
+
+    if size_bytes > AVATAR_UPLOAD_MAX_SIZE_BYTES {
+        return Err(AppError::bad_request(format!(
+            "size_bytes cannot exceed {AVATAR_UPLOAD_MAX_SIZE_BYTES}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn ensure_avatar_key_belongs_to_user(user_id: Uuid, object_key: &str) -> Result<(), AppError> {
+    let expected_prefix = format!("avatars/{user_id}/");
+
+    if !object_key.starts_with(&expected_prefix) {
+        return Err(AppError::bad_request("object_key is not valid for the current user"));
+    }
+
+    Ok(())
+}
+
+fn validate_confirmed_avatar_metadata(metadata: &ObjectMetadata) -> Result<(), AppError> {
+    let content_type = metadata
+        .content_type
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("uploaded avatar object is missing a content type"))?;
+    let normalized_content_type = normalize_avatar_content_type(content_type)?;
+    let content_length = metadata
+        .content_length
+        .ok_or_else(|| AppError::bad_request("uploaded avatar object is missing a content length"))?;
+
+    validate_avatar_size(content_length)?;
+
+    if normalized_content_type != content_type {
+        return Err(AppError::bad_request(
+            "uploaded avatar object content type does not match the allowed set",
+        ));
+    }
+
+    Ok(())
+}
+
 fn map_email_verification_error(error: EmailVerificationError) -> AppError {
     match error {
         EmailVerificationError::Database(error) => AppError::from(error),
@@ -702,6 +863,10 @@ fn map_password_reset_error(error: PasswordResetError) -> AppError {
 
 fn map_email_send_error(error: EmailError) -> AppError {
     AppError::internal(format!("failed to queue transactional email: {error}"))
+}
+
+fn map_object_storage_error(error: ObjectStorageError) -> AppError {
+    AppError::internal(format!("object storage operation failed: {error}"))
 }
 
 #[derive(Debug)]
