@@ -10,6 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+aws-config = "1.8.8"
+aws-credential-types = "1.2.8"
+aws-sdk-s3 = "1.115.0"
 axum = { version = "0.8.1", features = ["http1", "json", "tokio"] }
 envy = "0.4.2"
 http = "1.2.0"

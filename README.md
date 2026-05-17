@@ -70,6 +70,11 @@ cargo sqlx prepare --workspace
 
 Commit the generated `.sqlx/` metadata alongside future query changes that rely on SQLx compile-time verification.
 
+### Object storage wrapper
+
+The backend includes an S3-compatible client wrapper in `backend/apps/api/src/object_storage.rs`.
+It uses the existing object storage environment variables and exposes helpers for presigned PUT/GET URLs plus `head_object` and `delete_object`.
+
 ### Frontend
 
 ```bash

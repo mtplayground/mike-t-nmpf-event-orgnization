@@ -13,6 +13,7 @@ use tower_http::{
 #[derive(Clone)]
 pub struct AppState {
     pub db_pool: PgPool,
+    pub object_storage: crate::object_storage::ObjectStorageClient,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -33,6 +34,7 @@ pub fn router(state: SharedAppState) -> Router {
 
 async fn health(State(state): State<SharedAppState>) -> Json<HealthResponse> {
     let _db_pool = &state.db_pool;
+    let _object_storage = &state.object_storage;
     Json(HealthResponse { status: "ok" })
 }
 

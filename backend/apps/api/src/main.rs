@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod database;
 mod logging;
+mod object_storage;
 mod shutdown;
 
 use std::{io, sync::Arc};
@@ -17,7 +18,13 @@ async fn main() -> Result<(), io::Error> {
     let db_pool = database::connect(&config.database)
         .await
         .map_err(io::Error::other)?;
-    let app_state = Arc::new(app::AppState { db_pool });
+    let object_storage = object_storage::ObjectStorageClient::from_config(&config.object_storage)
+        .await
+        .map_err(io::Error::other)?;
+    let app_state = Arc::new(app::AppState {
+        db_pool,
+        object_storage,
+    });
     let address = config.server.socket_addr();
     let listener = TcpListener::bind(address).await?;
 
