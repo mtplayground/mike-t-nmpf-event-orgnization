@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/auth-store';
 const routes = [
   { to: '/', label: 'Overview' },
   { to: '/auth', label: 'Auth' },
+  { to: '/profile', label: 'Profile' },
   { to: '/host', label: 'Host' },
   { to: '/attendee', label: 'Attendee' },
 ];

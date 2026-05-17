@@ -9,6 +9,7 @@ import { HomePage } from '@/pages/home-page';
 import { HostPage } from '@/pages/host-page';
 import { LoginPage } from '@/pages/login-page';
 import { NotFoundPage } from '@/pages/not-found-page';
+import { ProfilePage } from '@/pages/profile-page';
 import { RegisterPage } from '@/pages/register-page';
 import { ResetPasswordPage } from '@/pages/reset-password-page';
 import { VerifyEmailPage } from '@/pages/verify-email-page';
@@ -25,6 +26,14 @@ export const router = createBrowserRouter([
       { path: 'auth/verify-email', element: <VerifyEmailPage /> },
       { path: 'auth/forgot-password', element: <ForgotPasswordPage /> },
       { path: 'auth/reset-password', element: <ResetPasswordPage /> },
+      {
+        path: 'profile',
+        element: (
+          <ProtectedRoute>
+            <ProfilePage />
+          </ProtectedRoute>
+        ),
+      },
       {
         path: 'host',
         element: (

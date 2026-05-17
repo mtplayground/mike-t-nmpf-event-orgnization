@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 
-import { requestJson } from '@/lib/api-client';
+import {
+  requestJson,
+  uploadFileWithProgress,
+  type UploadRequestHeader,
+} from '@/lib/api-client';
 
 const AUTH_STORAGE_KEY = 'event-organization.auth';
 const ACCESS_TOKEN_REFRESH_WINDOW_MS = 60_000;
@@ -10,6 +14,8 @@ export type AuthUser = {
   email: string;
   display_name: string;
   email_verified: boolean;
+  bio?: string | null;
+  avatar_object_key?: string | null;
 };
 
 type TokenPayload = {
@@ -34,6 +40,24 @@ type RegisterPayload = {
   email: string;
   password: string;
   display_name: string;
+};
+
+export type Profile = {
+  id: string;
+  email: string;
+  display_name: string;
+  bio: string | null;
+  avatar_object_key: string | null;
+  email_verified: boolean;
+};
+
+type AvatarUploadUrlPayload = {
+  object_key: string;
+  method: string;
+  upload_url: string;
+  headers: UploadRequestHeader[];
+  expires_in_seconds: number;
+  max_size_bytes: number;
 };
 
 type AuthStore = {
@@ -61,6 +85,23 @@ type AuthStore = {
   resendVerification: (email: string) => Promise<void>;
   forgotPassword: (email: string) => Promise<void>;
   resetPassword: (token: string, password: string) => Promise<void>;
+  fetchProfile: () => Promise<Profile>;
+  updateProfile: (payload: {
+    display_name?: string;
+    bio?: string | null;
+  }) => Promise<Profile>;
+  createAvatarUploadUrl: (payload: {
+    contentType: string;
+    sizeBytes: number;
+  }) => Promise<AvatarUploadUrlPayload>;
+  uploadAvatarFile: (options: {
+    url: string;
+    method: string;
+    headers: UploadRequestHeader[];
+    file: File;
+    onProgress?: (progress: number) => void;
+  }) => Promise<void>;
+  confirmAvatarUpload: (objectKey: string) => Promise<Profile>;
 };
 
 let inflightRefresh: Promise<boolean> | null = null;
@@ -199,6 +240,87 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       body: { token, password },
     });
   },
+  fetchProfile: async (): Promise<Profile> => {
+    const refreshed = await get().refreshSession();
+    const session = get().session;
+
+    if (!refreshed || !session) {
+      throw new Error('You must be signed in to continue.');
+    }
+
+    return requestJson<Profile>('/me', {
+      token: session.accessToken,
+    });
+  },
+  updateProfile: async (payload): Promise<Profile> => {
+    const refreshed = await get().refreshSession();
+    const session = get().session;
+
+    if (!refreshed || !session) {
+      throw new Error('You must be signed in to continue.');
+    }
+
+    const profile = await requestJson<Profile>('/me', {
+      method: 'PATCH',
+      body: payload,
+      token: session.accessToken,
+    });
+
+    syncSessionUser(set, get, profile);
+    return profile;
+  },
+  createAvatarUploadUrl: async ({
+    contentType,
+    sizeBytes,
+  }): Promise<AvatarUploadUrlPayload> => {
+    const refreshed = await get().refreshSession();
+    const session = get().session;
+
+    if (!refreshed || !session) {
+      throw new Error('You must be signed in to continue.');
+    }
+
+    return requestJson<AvatarUploadUrlPayload>('/me/avatar/upload-url', {
+      method: 'POST',
+      body: {
+        content_type: contentType,
+        size_bytes: sizeBytes,
+      },
+      token: session.accessToken,
+    });
+  },
+  uploadAvatarFile: async ({
+    file,
+    headers,
+    method,
+    onProgress,
+    url,
+  }): Promise<void> => {
+    await uploadFileWithProgress({
+      file,
+      headers,
+      method,
+      onProgress,
+      url,
+    });
+  },
+  confirmAvatarUpload: async (objectKey): Promise<Profile> => {
+    const refreshed = await get().refreshSession();
+    const session = get().session;
+
+    if (!refreshed || !session) {
+      throw new Error('You must be signed in to continue.');
+    }
+
+    const profile = await requestJson<Profile>('/me/avatar/confirm', {
+      method: 'POST',
+      body: { object_key: objectKey },
+      token: session.accessToken,
+    });
+
+    syncSessionUser(set, get, profile);
+    return profile;
+  },
 }));
 
 function toAuthSession(payload: TokenPayload): AuthSession {
@@ -233,4 +355,30 @@ function readStoredSession(): AuthSession | null {
 
 function clearStoredSession() {
   window.localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function syncSessionUser(
+  set: (partial: Partial<AuthStore>) => void,
+  get: () => AuthStore,
+  profile: Profile,
+) {
+  const session = get().session;
+
+  if (!session) {
+    return;
+  }
+
+  const nextSession: AuthSession = {
+    ...session,
+    user: {
+      ...session.user,
+      display_name: profile.display_name,
+      bio: profile.bio,
+      avatar_object_key: profile.avatar_object_key,
+      email_verified: profile.email_verified,
+    },
+  };
+
+  persistSession(nextSession);
+  set({ session: nextSession });
 }
