@@ -1,6 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
-use axum::{Json, Router, extract::State, middleware, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    middleware,
+    routing::{get, post},
+};
 use chrono::{DateTime, Duration, Utc};
 use http::{HeaderValue, Method};
 use serde::{Deserialize, Serialize};
@@ -21,6 +26,7 @@ use crate::{
     email::{EmailError, EmailService},
     email_verification::{EmailVerificationError, EmailVerificationService},
     error::{ApiResponse, AppError},
+    event_images::{self, EventImageVariant},
     extract::{CurrentUser, ValidatedJson},
     password_reset::{PasswordResetError, PasswordResetService},
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
@@ -30,6 +36,8 @@ use crate::{
 
 const AVATAR_UPLOAD_MAX_SIZE_BYTES: i64 = 5 * 1024 * 1024;
 const AVATAR_UPLOAD_URL_TTL_SECONDS: u64 = 900;
+const EVENT_COVER_UPLOAD_MAX_SIZE_BYTES: i64 = 10 * 1024 * 1024;
+const EVENT_COVER_UPLOAD_URL_TTL_SECONDS: u64 = 900;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -222,12 +230,50 @@ struct ConfirmAvatarUploadRequest {
     object_key: String,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+struct EventCoverUploadUrlRequest {
+    #[validate(length(min = 1, max = 128, message = "content_type must be provided"))]
+    content_type: String,
+    size_bytes: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EventCoverUploadUrlResponse {
+    event_id: Uuid,
+    object_key: String,
+    method: String,
+    upload_url: String,
+    headers: Vec<PresignedHeader>,
+    expires_in_seconds: u64,
+    max_size_bytes: i64,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct ConfirmEventCoverUploadRequest {
+    #[validate(length(min = 1, max = 512, message = "object_key must be provided"))]
+    object_key: String,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfirmEventCoverUploadResponse {
+    event_id: Uuid,
+    object_key: String,
+    variant: &'static str,
+    width: i32,
+    height: i32,
+    bytes: i64,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
         .route("/me/avatar/upload-url", post(create_avatar_upload_url))
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
+        .route("/events/:id/cover/upload-url", post(create_event_cover_upload_url))
+        .route("/events/:id/cover/confirm", post(confirm_event_cover_upload))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::require_current_user,
@@ -639,6 +685,85 @@ async fn confirm_avatar_upload(
     Ok(Json(ApiResponse::new(build_current_user_response(&user))))
 }
 
+async fn create_event_cover_upload_url(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<EventCoverUploadUrlRequest>,
+) -> Result<Json<ApiResponse<EventCoverUploadUrlResponse>>, AppError> {
+    let content_type = normalize_image_content_type(payload.content_type.trim())?;
+    validate_cover_size(payload.size_bytes)?;
+
+    let object_key = build_event_cover_object_key(event_id, current_user.id, content_type);
+    let presigned = state
+        .object_storage
+        .put_presigned_url(
+            &object_key,
+            Some(content_type),
+            Some(payload.size_bytes),
+            std::time::Duration::from_secs(EVENT_COVER_UPLOAD_URL_TTL_SECONDS),
+        )
+        .await
+        .map_err(map_object_storage_error)?;
+
+    Ok(Json(ApiResponse::new(EventCoverUploadUrlResponse {
+        event_id,
+        object_key,
+        method: presigned.method,
+        upload_url: presigned.uri,
+        headers: presigned
+            .headers
+            .into_iter()
+            .map(|(name, value)| PresignedHeader { name, value })
+            .collect(),
+        expires_in_seconds: presigned.expires_in.as_secs(),
+        max_size_bytes: EVENT_COVER_UPLOAD_MAX_SIZE_BYTES,
+    })))
+}
+
+async fn confirm_event_cover_upload(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<ConfirmEventCoverUploadRequest>,
+) -> Result<Json<ApiResponse<ConfirmEventCoverUploadResponse>>, AppError> {
+    let object_key = payload.object_key.trim();
+    ensure_event_cover_key_is_owned(event_id, current_user.id, object_key)?;
+    validate_positive_dimensions(payload.width, payload.height)?;
+
+    let metadata = state
+        .object_storage
+        .head_object(object_key)
+        .await
+        .map_err(map_object_storage_error)?
+        .ok_or_else(|| AppError::bad_request("uploaded event cover object was not found"))?;
+
+    validate_confirmed_cover_metadata(&metadata)?;
+
+    let image = event_images::upsert_event_image(
+        &state.db_pool,
+        event_id,
+        object_key,
+        EventImageVariant::Hero,
+        payload.width,
+        payload.height,
+        metadata
+            .content_length
+            .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content length"))?,
+    )
+    .await
+    .map_err(AppError::from)?;
+
+    Ok(Json(ApiResponse::new(ConfirmEventCoverUploadResponse {
+        event_id: image.event_id,
+        object_key: image.object_key,
+        variant: image.variant.as_str(),
+        width: image.width,
+        height: image.height,
+        bytes: image.bytes,
+    })))
+}
+
 async fn forgot_password(
     State(state): State<SharedAppState>,
     payload: ValidatedJson<ForgotPasswordRequest>,
@@ -776,7 +901,30 @@ fn build_avatar_object_key(user_id: Uuid, content_type: &str) -> String {
     format!("avatars/{user_id}/{}.{}", Uuid::new_v4(), extension)
 }
 
+fn build_event_cover_object_key(
+    event_id: Uuid,
+    user_id: Uuid,
+    content_type: &str,
+) -> String {
+    let extension = file_extension_for_content_type(content_type);
+
+    format!("events/{event_id}/covers/{user_id}/hero-{}.{}", Uuid::new_v4(), extension)
+}
+
+fn file_extension_for_content_type(content_type: &str) -> &'static str {
+    match content_type {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
 fn normalize_avatar_content_type(content_type: &str) -> Result<&'static str, AppError> {
+    normalize_image_content_type(content_type)
+}
+
+fn normalize_image_content_type(content_type: &str) -> Result<&'static str, AppError> {
     match content_type.to_ascii_lowercase().as_str() {
         "image/jpeg" | "image/jpg" => Ok("image/jpeg"),
         "image/png" => Ok("image/png"),
@@ -801,11 +949,41 @@ fn validate_avatar_size(size_bytes: i64) -> Result<(), AppError> {
     Ok(())
 }
 
+fn validate_cover_size(size_bytes: i64) -> Result<(), AppError> {
+    if size_bytes <= 0 {
+        return Err(AppError::bad_request("size_bytes must be greater than zero"));
+    }
+
+    if size_bytes > EVENT_COVER_UPLOAD_MAX_SIZE_BYTES {
+        return Err(AppError::bad_request(format!(
+            "size_bytes cannot exceed {EVENT_COVER_UPLOAD_MAX_SIZE_BYTES}"
+        )));
+    }
+
+    Ok(())
+}
+
 fn ensure_avatar_key_belongs_to_user(user_id: Uuid, object_key: &str) -> Result<(), AppError> {
     let expected_prefix = format!("avatars/{user_id}/");
 
     if !object_key.starts_with(&expected_prefix) {
         return Err(AppError::bad_request("object_key is not valid for the current user"));
+    }
+
+    Ok(())
+}
+
+fn ensure_event_cover_key_is_owned(
+    event_id: Uuid,
+    user_id: Uuid,
+    object_key: &str,
+) -> Result<(), AppError> {
+    let expected_prefix = format!("events/{event_id}/covers/{user_id}/");
+
+    if !object_key.starts_with(&expected_prefix) {
+        return Err(AppError::bad_request(
+            "object_key is not valid for the current user and event",
+        ));
     }
 
     Ok(())
@@ -827,6 +1005,39 @@ fn validate_confirmed_avatar_metadata(metadata: &ObjectMetadata) -> Result<(), A
         return Err(AppError::bad_request(
             "uploaded avatar object content type does not match the allowed set",
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_confirmed_cover_metadata(metadata: &ObjectMetadata) -> Result<(), AppError> {
+    let content_type = metadata
+        .content_type
+        .as_deref()
+        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content type"))?;
+    let normalized_content_type = normalize_image_content_type(content_type)?;
+    let content_length = metadata
+        .content_length
+        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content length"))?;
+
+    validate_cover_size(content_length)?;
+
+    if normalized_content_type != content_type {
+        return Err(AppError::bad_request(
+            "uploaded event cover object content type does not match the allowed set",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_positive_dimensions(width: i32, height: i32) -> Result<(), AppError> {
+    if width <= 0 {
+        return Err(AppError::bad_request("width must be greater than zero"));
+    }
+
+    if height <= 0 {
+        return Err(AppError::bad_request("height must be greater than zero"));
     }
 
     Ok(())
