@@ -134,3 +134,33 @@ pub async fn mark_email_verified(
     .fetch_optional(&mut **transaction)
     .await
 }
+
+pub async fn update_password_hash(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    password_hash: &str,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET
+            password_hash = $2,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING
+            id,
+            email,
+            password_hash,
+            display_name,
+            avatar_object_key,
+            bio,
+            email_verified_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(password_hash)
+    .fetch_optional(&mut **transaction)
+    .await
+}
