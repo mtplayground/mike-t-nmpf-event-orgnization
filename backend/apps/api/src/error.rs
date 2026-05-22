@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, HashMap}, fmt};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
 
 use axum::{
     Json,
@@ -38,6 +41,7 @@ pub struct ErrorEnvelope {
 pub enum AppError {
     BadRequest { message: String },
     Conflict { message: String },
+    NotFound { message: String },
     Unauthorized { message: String },
     Internal { message: String },
     Validation(ValidationErrors),
@@ -47,33 +51,32 @@ pub enum AppError {
 
 impl AppError {
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::BadRequest {
-            message: message.into(),
-        }
+        Self::BadRequest { message: message.into() }
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {
-        Self::Conflict {
-            message: message.into(),
-        }
+        Self::Conflict { message: message.into() }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound { message: message.into() }
     }
 
     pub fn unauthorized(message: impl Into<String>) -> Self {
-        Self::Unauthorized {
-            message: message.into(),
-        }
+        Self::Unauthorized { message: message.into() }
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::Internal {
-            message: message.into(),
-        }
+        Self::Internal { message: message.into() }
     }
 
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::BadRequest { .. } | Self::Validation(_) | Self::Json(_) => StatusCode::BAD_REQUEST,
+            Self::BadRequest { .. } | Self::Validation(_) | Self::Json(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             Self::Internal { .. } | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -83,6 +86,7 @@ impl AppError {
         match self {
             Self::BadRequest { .. } => "bad_request",
             Self::Conflict { .. } => "conflict",
+            Self::NotFound { .. } => "not_found",
             Self::Unauthorized { .. } => "unauthorized",
             Self::Internal { .. } => "internal_error",
             Self::Validation(_) => "validation_failed",
@@ -95,11 +99,14 @@ impl AppError {
         match self {
             Self::BadRequest { message } => message.clone(),
             Self::Conflict { message } => message.clone(),
+            Self::NotFound { message } => message.clone(),
             Self::Unauthorized { message } => message.clone(),
             Self::Internal { message } => message.clone(),
             Self::Validation(_) => "One or more request fields failed validation.".to_owned(),
             Self::Json(rejection) => rejection.body_text(),
-            Self::Database(_) => "A database error occurred while processing the request.".to_owned(),
+            Self::Database(_) => {
+                "A database error occurred while processing the request.".to_owned()
+            }
         }
     }
 
@@ -149,6 +156,7 @@ impl fmt::Display for AppError {
         match self {
             Self::BadRequest { message } => formatter.write_str(message),
             Self::Conflict { message } => formatter.write_str(message),
+            Self::NotFound { message } => formatter.write_str(message),
             Self::Unauthorized { message } => formatter.write_str(message),
             Self::Internal { message } => formatter.write_str(message),
             Self::Validation(_) => formatter.write_str("request validation failed"),
@@ -160,20 +168,16 @@ impl fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
-fn flatten_validation_errors(
-    errors: &ValidationErrors,
-) -> BTreeMap<String, Vec<String>> {
+fn flatten_validation_errors(errors: &ValidationErrors) -> BTreeMap<String, Vec<String>> {
     let mut field_errors = BTreeMap::new();
 
     for (field, kind) in errors.field_errors() {
         let messages = kind
             .iter()
             .map(|error| {
-                error
-                    .message
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| default_validation_message(error.code.as_ref(), &error.params))
+                error.message.as_ref().map(ToString::to_string).unwrap_or_else(|| {
+                    default_validation_message(error.code.as_ref(), &error.params)
+                })
             })
             .collect();
 

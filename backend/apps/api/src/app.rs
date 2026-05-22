@@ -18,8 +18,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::info;
-use validator::Validate;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::{
     auth::{JwtService, PasswordService},
@@ -28,10 +28,11 @@ use crate::{
     email_verification::{EmailVerificationError, EmailVerificationService},
     error::{ApiResponse, AppError},
     event_images::{self, EventImageVariant},
+    events::{self, EventLocationType, EventStatus, EventVisibility},
     extract::{CurrentUser, ValidatedJson},
+    object_storage::{ObjectMetadata, ObjectStorageError},
     password_reset::{PasswordResetError, PasswordResetService},
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
-    object_storage::{ObjectMetadata, ObjectStorageError},
     users::{self, NewUser},
 };
 
@@ -64,7 +65,11 @@ struct HealthResponse {
 
 #[derive(Debug, Deserialize, Validate)]
 struct ValidationProbe {
-    #[validate(length(min = 3, max = 64, message = "display_name must be between 3 and 64 characters"))]
+    #[validate(length(
+        min = 3,
+        max = 64,
+        message = "display_name must be between 3 and 64 characters"
+    ))]
     display_name: String,
 }
 
@@ -78,9 +83,17 @@ struct ValidationProbeResponse {
 struct RegisterRequest {
     #[validate(email(message = "email must be a valid email address"))]
     email: String,
-    #[validate(length(min = 8, max = 128, message = "password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "password must be between 8 and 128 characters"
+    ))]
     password: String,
-    #[validate(length(min = 3, max = 64, message = "display_name must be between 3 and 64 characters"))]
+    #[validate(length(
+        min = 3,
+        max = 64,
+        message = "display_name must be between 3 and 64 characters"
+    ))]
     display_name: String,
 }
 
@@ -130,9 +143,17 @@ struct ForgotPasswordResponse {
 
 #[derive(Debug, Deserialize, Validate)]
 struct ResetPasswordRequest {
-    #[validate(length(min = 64, max = 64, message = "token must be a valid password reset token"))]
+    #[validate(length(
+        min = 64,
+        max = 64,
+        message = "token must be a valid password reset token"
+    ))]
     token: String,
-    #[validate(length(min = 8, max = 128, message = "password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "password must be between 8 and 128 characters"
+    ))]
     password: String,
 }
 
@@ -147,7 +168,11 @@ struct ResetPasswordResponse {
 struct LoginRequest {
     #[validate(email(message = "email must be a valid email address"))]
     email: String,
-    #[validate(length(min = 8, max = 128, message = "password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "password must be between 8 and 128 characters"
+    ))]
     password: String,
 }
 
@@ -198,7 +223,11 @@ struct CurrentUserResponse {
 
 #[derive(Debug, Deserialize, Validate)]
 struct UpdateProfileRequest {
-    #[validate(length(min = 3, max = 64, message = "display_name must be between 3 and 64 characters"))]
+    #[validate(length(
+        min = 3,
+        max = 64,
+        message = "display_name must be between 3 and 64 characters"
+    ))]
     display_name: Option<String>,
     #[validate(length(max = 500, message = "bio must be 500 characters or fewer"))]
     bio: Option<String>,
@@ -275,14 +304,103 @@ struct ProcessedEventImageResponse {
     bytes: i64,
 }
 
+#[derive(Debug, Deserialize, Validate)]
+struct CreateEventRequest {
+    #[validate(length(
+        min = 1,
+        max = 180,
+        message = "title must be between 1 and 180 characters"
+    ))]
+    title: String,
+    #[validate(length(
+        max = 20_000,
+        message = "description_md must be 20000 characters or fewer"
+    ))]
+    description_md: Option<String>,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "timezone must be between 1 and 100 characters"
+    ))]
+    timezone: String,
+    location_type: EventLocationType,
+    #[validate(length(max = 500, message = "location_text must be 500 characters or fewer"))]
+    location_text: Option<String>,
+    #[validate(length(max = 1000, message = "location_url must be 1000 characters or fewer"))]
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: Option<EventVisibility>,
+    status: Option<EventStatus>,
+    cover_image_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct UpdateEventRequest {
+    #[validate(length(
+        min = 1,
+        max = 180,
+        message = "title must be between 1 and 180 characters"
+    ))]
+    title: Option<String>,
+    #[validate(length(
+        max = 20_000,
+        message = "description_md must be 20000 characters or fewer"
+    ))]
+    description_md: Option<String>,
+    start_at: Option<DateTime<Utc>>,
+    end_at: Option<DateTime<Utc>>,
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "timezone must be between 1 and 100 characters"
+    ))]
+    timezone: Option<String>,
+    location_type: Option<EventLocationType>,
+    #[validate(length(max = 500, message = "location_text must be 500 characters or fewer"))]
+    location_text: Option<String>,
+    #[validate(length(max = 1000, message = "location_url must be 1000 characters or fewer"))]
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: Option<EventVisibility>,
+    status: Option<EventStatus>,
+    cover_image_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventResponse {
+    id: Uuid,
+    host_id: Uuid,
+    title: String,
+    slug: String,
+    description_md: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_type: EventLocationType,
+    location_text: Option<String>,
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: EventVisibility,
+    status: EventStatus,
+    cover_image_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
         .route("/me/avatar/upload-url", post(create_avatar_upload_url))
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
-        .route("/events/:id/cover/upload-url", post(create_event_cover_upload_url))
-        .route("/events/:id/cover/confirm", post(confirm_event_cover_upload))
+        .route("/events", post(create_event))
+        .route("/events/{id}", get(read_event).patch(update_event).delete(cancel_event))
+        .route("/events/{id}/duplicate", post(duplicate_event))
+        .route("/events/{id}/cover/upload-url", post(create_event_cover_upload_url))
+        .route("/events/{id}/cover/confirm", post(confirm_event_cover_upload))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::require_current_user,
@@ -337,11 +455,7 @@ async fn register(
     let email = normalize_email(&payload.email);
     let display_name = payload.display_name.trim().to_owned();
 
-    if users::find_user_by_email(&state.db_pool, &email)
-        .await
-        .map_err(AppError::from)?
-        .is_some()
-    {
+    if users::find_user_by_email(&state.db_pool, &email).await.map_err(AppError::from)?.is_some() {
         return Err(AppError::conflict("email is already registered"));
     }
 
@@ -353,16 +467,13 @@ async fn register(
     let mut transaction = state.db_pool.begin().await.map_err(AppError::from)?;
     let user = users::insert_user(
         &mut transaction,
-        &NewUser {
-            email: email.clone(),
-            password_hash,
-            display_name: display_name.clone(),
-        },
+        &NewUser { email: email.clone(), password_hash, display_name: display_name.clone() },
     )
     .await
     .map_err(AppError::from)?;
 
-    let verification = state.email_verification_service
+    let verification = state
+        .email_verification_service
         .issue_for_user_in_tx(&mut transaction, user.id)
         .await
         .map_err(map_email_verification_error)?;
@@ -400,7 +511,8 @@ async fn verify_email(
     payload: ValidatedJson<VerifyEmailRequest>,
 ) -> Result<Json<ApiResponse<VerifyEmailResponse>>, AppError> {
     let mut transaction = state.db_pool.begin().await.map_err(AppError::from)?;
-    let verification = state.email_verification_service
+    let verification = state
+        .email_verification_service
         .consume_token_in_tx(&mut transaction, payload.token.trim())
         .await
         .map_err(map_email_verification_error)?;
@@ -408,7 +520,9 @@ async fn verify_email(
     let user = users::mark_email_verified(&mut transaction, verification.user_id, Utc::now())
         .await
         .map_err(AppError::from)?
-        .ok_or_else(|| AppError::bad_request("email verification token references an unknown user"))?;
+        .ok_or_else(|| {
+            AppError::bad_request("email verification token references an unknown user")
+        })?;
 
     transaction.commit().await.map_err(AppError::from)?;
 
@@ -425,21 +539,18 @@ async fn resend_verification(
     payload: ValidatedJson<ResendVerificationRequest>,
 ) -> Result<Json<ApiResponse<ResendVerificationResponse>>, AppError> {
     let email = normalize_email(&payload.email);
-    let Some(user) = users::find_user_by_email(&state.db_pool, &email)
-        .await
-        .map_err(AppError::from)? else {
-        return Ok(Json(ApiResponse::new(ResendVerificationResponse {
-            accepted: true,
-        })));
+    let Some(user) =
+        users::find_user_by_email(&state.db_pool, &email).await.map_err(AppError::from)?
+    else {
+        return Ok(Json(ApiResponse::new(ResendVerificationResponse { accepted: true })));
     };
 
     if user.email_verified_at.is_some() {
-        return Ok(Json(ApiResponse::new(ResendVerificationResponse {
-            accepted: true,
-        })));
+        return Ok(Json(ApiResponse::new(ResendVerificationResponse { accepted: true })));
     }
 
-    let verification = state.email_verification_service
+    let verification = state
+        .email_verification_service
         .issue_for_user(&state.db_pool, user.id)
         .await
         .map_err(map_email_verification_error)?;
@@ -462,9 +573,7 @@ async fn resend_verification(
         .await
         .map_err(map_email_send_error)?;
 
-    Ok(Json(ApiResponse::new(ResendVerificationResponse {
-        accepted: true,
-    })))
+    Ok(Json(ApiResponse::new(ResendVerificationResponse { accepted: true })))
 }
 
 async fn login(
@@ -474,9 +583,9 @@ async fn login(
     let email = normalize_email(&payload.email);
     state.login_rate_limiter.check(&email).await?;
 
-    let Some(user) = users::find_user_by_email(&state.db_pool, &email)
-        .await
-        .map_err(AppError::from)? else {
+    let Some(user) =
+        users::find_user_by_email(&state.db_pool, &email).await.map_err(AppError::from)?
+    else {
         state.login_rate_limiter.record_failure(&email).await;
         return Err(AppError::bad_request("invalid email or password"));
     };
@@ -562,9 +671,7 @@ async fn logout(
     Ok(Json(ApiResponse::new(LogoutResponse { revoked })))
 }
 
-async fn current_user(
-    current_user: CurrentUser,
-) -> Json<ApiResponse<CurrentUserResponse>> {
+async fn current_user(current_user: CurrentUser) -> Json<ApiResponse<CurrentUserResponse>> {
     Json(ApiResponse::new(CurrentUserResponse {
         id: current_user.id,
         email: current_user.email.clone(),
@@ -593,9 +700,7 @@ async fn update_profile(
     payload: ValidatedJson<UpdateProfileRequest>,
 ) -> Result<Json<ApiResponse<CurrentUserResponse>>, AppError> {
     if payload.display_name.is_none() && payload.bio.is_none() {
-        return Err(AppError::bad_request(
-            "at least one profile field must be provided",
-        ));
+        return Err(AppError::bad_request("at least one profile field must be provided"));
     }
 
     let existing_user = users::find_user_by_id(&state.db_pool, current_user.id)
@@ -618,19 +723,16 @@ async fn update_profile(
     let bio = match payload.bio.as_ref() {
         Some(value) => {
             let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
+            if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) }
         }
         None => existing_user.bio.clone(),
     };
 
-    let user = users::update_profile(&state.db_pool, current_user.id, &display_name, bio.as_deref())
-        .await
-        .map_err(AppError::from)?
-        .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
+    let user =
+        users::update_profile(&state.db_pool, current_user.id, &display_name, bio.as_deref())
+            .await
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
 
     Ok(Json(ApiResponse::new(build_current_user_response(&user))))
 }
@@ -694,12 +796,200 @@ async fn confirm_avatar_upload(
     Ok(Json(ApiResponse::new(build_current_user_response(&user))))
 }
 
+async fn create_event(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<CreateEventRequest>,
+) -> Result<Json<ApiResponse<EventResponse>>, AppError> {
+    let title = normalize_required_text(&payload.title, "title")?;
+    let description_md =
+        payload.description_md.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    let timezone = normalize_required_text(&payload.timezone, "timezone")?;
+    let location_text = normalize_optional_text(payload.location_text.as_deref());
+    let location_url = normalize_optional_text(payload.location_url.as_deref());
+    let visibility = payload.visibility.unwrap_or(EventVisibility::Draft);
+    let status = payload.status.unwrap_or_else(|| default_event_status(visibility));
+
+    validate_event_times(payload.start_at, payload.end_at)?;
+    validate_event_location(
+        payload.location_type,
+        location_text.as_deref(),
+        location_url.as_deref(),
+    )?;
+    validate_event_capacity(payload.capacity)?;
+    validate_event_visibility_status(visibility, status)?;
+
+    if payload.cover_image_id.is_some() {
+        return Err(AppError::bad_request(
+            "cover_image_id can only be set after the event is created",
+        ));
+    }
+
+    let slug = unique_event_slug(&state, &title, None).await?;
+    let event = events::insert_event(
+        &state.db_pool,
+        &events::NewEvent {
+            host_id: current_user.id,
+            title,
+            slug,
+            description_md,
+            start_at: payload.start_at,
+            end_at: payload.end_at,
+            timezone,
+            location_type: payload.location_type,
+            location_text,
+            location_url,
+            capacity: payload.capacity,
+            visibility,
+            status,
+            cover_image_id: None,
+        },
+    )
+    .await
+    .map_err(map_event_write_error)?;
+
+    Ok(Json(ApiResponse::new(build_event_response(event))))
+}
+
+async fn read_event(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<EventResponse>>, AppError> {
+    let event = require_host_event(&state, event_id, current_user.id).await?;
+
+    Ok(Json(ApiResponse::new(build_event_response(event))))
+}
+
+async fn update_event(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<UpdateEventRequest>,
+) -> Result<Json<ApiResponse<EventResponse>>, AppError> {
+    let existing = require_host_event(&state, event_id, current_user.id).await?;
+    let title = match payload.title.as_deref() {
+        Some(value) => normalize_required_text(value, "title")?,
+        None => existing.title.clone(),
+    };
+    let slug = if title == existing.title {
+        existing.slug.clone()
+    } else {
+        unique_event_slug(&state, &title, Some(event_id)).await?
+    };
+    let description_md = match payload.description_md.as_deref() {
+        Some(value) => value.trim().to_owned(),
+        None => existing.description_md.clone(),
+    };
+    let start_at = payload.start_at.unwrap_or(existing.start_at);
+    let end_at = payload.end_at.unwrap_or(existing.end_at);
+    let timezone = match payload.timezone.as_deref() {
+        Some(value) => normalize_required_text(value, "timezone")?,
+        None => existing.timezone.clone(),
+    };
+    let location_type = payload.location_type.unwrap_or(existing.location_type);
+    let location_text = match payload.location_text.as_deref() {
+        Some(value) => normalize_optional_text(Some(value)),
+        None => existing.location_text.clone(),
+    };
+    let location_url = match payload.location_url.as_deref() {
+        Some(value) => normalize_optional_text(Some(value)),
+        None => existing.location_url.clone(),
+    };
+    let capacity = payload.capacity.or(existing.capacity);
+    let visibility = payload.visibility.unwrap_or(existing.visibility);
+    let status = payload.status.unwrap_or(existing.status);
+    let cover_image_id = payload.cover_image_id.or(existing.cover_image_id);
+
+    validate_event_times(start_at, end_at)?;
+    validate_event_location(location_type, location_text.as_deref(), location_url.as_deref())?;
+    validate_event_capacity(capacity)?;
+    validate_event_visibility_status(visibility, status)?;
+
+    if let Some(cover_image_id) = cover_image_id {
+        ensure_cover_image_belongs_to_event(&state, cover_image_id, event_id).await?;
+    }
+
+    let event = events::update_event_for_host(
+        &state.db_pool,
+        event_id,
+        current_user.id,
+        &events::EventChanges {
+            title,
+            slug,
+            description_md,
+            start_at,
+            end_at,
+            timezone,
+            location_type,
+            location_text,
+            location_url,
+            capacity,
+            visibility,
+            status,
+            cover_image_id,
+        },
+    )
+    .await
+    .map_err(map_event_write_error)?
+    .ok_or_else(|| AppError::not_found("event was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_event_response(event))))
+}
+
+async fn cancel_event(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<EventResponse>>, AppError> {
+    let event = events::cancel_event_for_host(&state.db_pool, event_id, current_user.id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found("event was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_event_response(event))))
+}
+
+async fn duplicate_event(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<EventResponse>>, AppError> {
+    let existing = require_host_event(&state, event_id, current_user.id).await?;
+    let duplicate_title = format!("{} Copy", existing.title);
+    let slug = unique_event_slug(&state, &duplicate_title, None).await?;
+    let event = events::insert_event(
+        &state.db_pool,
+        &events::NewEvent {
+            host_id: current_user.id,
+            title: duplicate_title,
+            slug,
+            description_md: existing.description_md,
+            start_at: existing.start_at,
+            end_at: existing.end_at,
+            timezone: existing.timezone,
+            location_type: existing.location_type,
+            location_text: existing.location_text,
+            location_url: existing.location_url,
+            capacity: existing.capacity,
+            visibility: EventVisibility::Draft,
+            status: EventStatus::Draft,
+            cover_image_id: None,
+        },
+    )
+    .await
+    .map_err(map_event_write_error)?;
+
+    Ok(Json(ApiResponse::new(build_event_response(event))))
+}
+
 async fn create_event_cover_upload_url(
     State(state): State<SharedAppState>,
     Path(event_id): Path<Uuid>,
     current_user: CurrentUser,
     payload: ValidatedJson<EventCoverUploadUrlRequest>,
 ) -> Result<Json<ApiResponse<EventCoverUploadUrlResponse>>, AppError> {
+    let _event = require_host_event(&state, event_id, current_user.id).await?;
     let content_type = normalize_image_content_type(payload.content_type.trim())?;
     validate_cover_source_size(payload.size_bytes)?;
 
@@ -736,6 +1026,7 @@ async fn confirm_event_cover_upload(
     current_user: CurrentUser,
     payload: ValidatedJson<ConfirmEventCoverUploadRequest>,
 ) -> Result<Json<ApiResponse<ConfirmEventCoverUploadResponse>>, AppError> {
+    let _event = require_host_event(&state, event_id, current_user.id).await?;
     let object_key = payload.object_key.trim();
     ensure_event_cover_key_is_owned(event_id, current_user.id, object_key)?;
     let existing_images = event_images::find_event_images_by_event_id(&state.db_pool, event_id)
@@ -776,10 +1067,7 @@ async fn confirm_event_cover_upload(
         )
         .await
     {
-        let _ = state
-            .object_storage
-            .delete_object(&processed.hero.object_key)
-            .await;
+        let _ = state.object_storage.delete_object(&processed.hero.object_key).await;
         return Err(map_object_storage_error(error));
     }
 
@@ -847,12 +1135,10 @@ async fn forgot_password(
     payload: ValidatedJson<ForgotPasswordRequest>,
 ) -> Result<Json<ApiResponse<ForgotPasswordResponse>>, AppError> {
     let email = normalize_email(&payload.email);
-    let Some(user) = users::find_user_by_email(&state.db_pool, &email)
-        .await
-        .map_err(AppError::from)? else {
-        return Ok(Json(ApiResponse::new(ForgotPasswordResponse {
-            accepted: true,
-        })));
+    let Some(user) =
+        users::find_user_by_email(&state.db_pool, &email).await.map_err(AppError::from)?
+    else {
+        return Ok(Json(ApiResponse::new(ForgotPasswordResponse { accepted: true })));
     };
 
     let reset = state
@@ -870,18 +1156,11 @@ async fn forgot_password(
 
     state
         .email_service
-        .send_password_reset_email(
-            &user.email,
-            &user.display_name,
-            &reset.token,
-            reset.expires_at,
-        )
+        .send_password_reset_email(&user.email, &user.display_name, &reset.token, reset.expires_at)
         .await
         .map_err(map_email_send_error)?;
 
-    Ok(Json(ApiResponse::new(ForgotPasswordResponse {
-        accepted: true,
-    })))
+    Ok(Json(ApiResponse::new(ForgotPasswordResponse { accepted: true })))
 }
 
 async fn reset_password(
@@ -922,7 +1201,14 @@ async fn reset_password(
 
 fn build_cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS, Method::POST])
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
             origin == HeaderValue::from_static("http://localhost:8080")
                 || origin == HeaderValue::from_static("http://127.0.0.1:8080")
@@ -968,6 +1254,195 @@ fn build_current_user_response(user: &users::User) -> CurrentUserResponse {
     }
 }
 
+fn build_event_response(event: events::Event) -> EventResponse {
+    EventResponse {
+        id: event.id,
+        host_id: event.host_id,
+        title: event.title,
+        slug: event.slug,
+        description_md: event.description_md,
+        start_at: event.start_at,
+        end_at: event.end_at,
+        timezone: event.timezone,
+        location_type: event.location_type,
+        location_text: event.location_text,
+        location_url: event.location_url,
+        capacity: event.capacity,
+        visibility: event.visibility,
+        status: event.status,
+        cover_image_id: event.cover_image_id,
+        created_at: event.created_at,
+        updated_at: event.updated_at,
+        cancelled_at: event.cancelled_at,
+    }
+}
+
+async fn require_host_event(
+    state: &SharedAppState,
+    event_id: Uuid,
+    host_id: Uuid,
+) -> Result<events::Event, AppError> {
+    events::find_event_for_host(&state.db_pool, event_id, host_id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found("event was not found"))
+}
+
+fn normalize_required_text(value: &str, field_name: &'static str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request(format!("{field_name} cannot be blank")));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned)
+}
+
+fn validate_event_times(start_at: DateTime<Utc>, end_at: DateTime<Utc>) -> Result<(), AppError> {
+    if end_at < start_at {
+        return Err(AppError::bad_request("end_at must be at or after start_at"));
+    }
+
+    Ok(())
+}
+
+fn validate_event_capacity(capacity: Option<i32>) -> Result<(), AppError> {
+    if matches!(capacity, Some(value) if value <= 0) {
+        return Err(AppError::bad_request("capacity must be greater than zero"));
+    }
+
+    Ok(())
+}
+
+fn validate_event_location(
+    location_type: EventLocationType,
+    location_text: Option<&str>,
+    location_url: Option<&str>,
+) -> Result<(), AppError> {
+    match location_type {
+        EventLocationType::InPerson if location_text.is_none() => {
+            Err(AppError::bad_request("location_text is required for in-person events"))
+        }
+        EventLocationType::Virtual if location_url.is_none() => {
+            Err(AppError::bad_request("location_url is required for virtual events"))
+        }
+        EventLocationType::Hybrid if location_text.is_none() || location_url.is_none() => Err(
+            AppError::bad_request("location_text and location_url are required for hybrid events"),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn default_event_status(visibility: EventVisibility) -> EventStatus {
+    match visibility {
+        EventVisibility::Draft => EventStatus::Draft,
+        EventVisibility::Public | EventVisibility::Unlisted | EventVisibility::Private => {
+            EventStatus::Published
+        }
+    }
+}
+
+fn validate_event_visibility_status(
+    visibility: EventVisibility,
+    status: EventStatus,
+) -> Result<(), AppError> {
+    if status == EventStatus::Draft && visibility != EventVisibility::Draft {
+        return Err(AppError::bad_request("draft events must use draft visibility"));
+    }
+
+    if status == EventStatus::Published && visibility == EventVisibility::Draft {
+        return Err(AppError::bad_request("published events cannot use draft visibility"));
+    }
+
+    Ok(())
+}
+
+async fn unique_event_slug(
+    state: &SharedAppState,
+    title: &str,
+    existing_event_id: Option<Uuid>,
+) -> Result<String, AppError> {
+    let base_slug = slugify_event_title(title);
+
+    for suffix in 0..100 {
+        let candidate =
+            if suffix == 0 { base_slug.clone() } else { format!("{base_slug}-{suffix}") };
+
+        let exists = match existing_event_id {
+            Some(event_id) => {
+                events::slug_exists_for_other_event(&state.db_pool, &candidate, event_id).await
+            }
+            None => events::slug_exists(&state.db_pool, &candidate).await,
+        }
+        .map_err(AppError::from)?;
+
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(format!("{base_slug}-{}", Uuid::new_v4()))
+}
+
+fn slugify_event_title(title: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+
+    for character in title.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() { "event".to_owned() } else { slug }
+}
+
+async fn ensure_cover_image_belongs_to_event(
+    state: &SharedAppState,
+    cover_image_id: Uuid,
+    event_id: Uuid,
+) -> Result<(), AppError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM event_images WHERE id = $1 AND event_id = $2)",
+    )
+    .bind(cover_image_id)
+    .bind(event_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(AppError::from)?;
+
+    if !exists {
+        return Err(AppError::bad_request("cover_image_id does not belong to the event"));
+    }
+
+    Ok(())
+}
+
+fn map_event_write_error(error: sqlx::Error) -> AppError {
+    if is_event_slug_unique_violation(&error) {
+        AppError::conflict("event slug is already in use")
+    } else {
+        AppError::from(error)
+    }
+}
+
+fn is_event_slug_unique_violation(error: &sqlx::Error) -> bool {
+    error.as_database_error().and_then(|database_error| database_error.constraint())
+        == Some("events_slug_unique_idx")
+}
+
 fn build_avatar_object_key(user_id: Uuid, content_type: &str) -> String {
     let extension = match content_type {
         "image/jpeg" => "jpg",
@@ -979,25 +1454,14 @@ fn build_avatar_object_key(user_id: Uuid, content_type: &str) -> String {
     format!("avatars/{user_id}/{}.{}", Uuid::new_v4(), extension)
 }
 
-fn build_event_cover_object_key(
-    event_id: Uuid,
-    user_id: Uuid,
-    content_type: &str,
-) -> String {
+fn build_event_cover_object_key(event_id: Uuid, user_id: Uuid, content_type: &str) -> String {
     let extension = file_extension_for_content_type(content_type);
 
     format!("events/{event_id}/covers/{user_id}/hero-{}.{}", Uuid::new_v4(), extension)
 }
 
-fn build_processed_event_cover_object_key(
-    event_id: Uuid,
-    variant: EventImageVariant,
-) -> String {
-    format!(
-        "events/{event_id}/images/{}-{}.png",
-        variant.as_str(),
-        Uuid::new_v4()
-    )
+fn build_processed_event_cover_object_key(event_id: Uuid, variant: EventImageVariant) -> String {
+    format!("events/{event_id}/images/{}-{}.png", variant.as_str(), Uuid::new_v4())
 }
 
 fn file_extension_for_content_type(content_type: &str) -> &'static str {
@@ -1084,9 +1548,9 @@ fn validate_confirmed_avatar_metadata(metadata: &ObjectMetadata) -> Result<(), A
         .as_deref()
         .ok_or_else(|| AppError::bad_request("uploaded avatar object is missing a content type"))?;
     let normalized_content_type = normalize_avatar_content_type(content_type)?;
-    let content_length = metadata
-        .content_length
-        .ok_or_else(|| AppError::bad_request("uploaded avatar object is missing a content length"))?;
+    let content_length = metadata.content_length.ok_or_else(|| {
+        AppError::bad_request("uploaded avatar object is missing a content length")
+    })?;
 
     validate_avatar_size(content_length)?;
 
@@ -1138,15 +1602,16 @@ fn process_event_cover_upload(
     validate_positive_dimensions(reported_width, reported_height)?;
     validate_cover_source_size(source_object.bytes.len() as i64)?;
 
-    let source_content_type = source_object
-        .content_type
-        .as_deref()
-        .ok_or_else(|| AppError::bad_request("uploaded event cover object is missing a content type"))?;
+    let source_content_type = source_object.content_type.as_deref().ok_or_else(|| {
+        AppError::bad_request("uploaded event cover object is missing a content type")
+    })?;
     let normalized_content_type = normalize_image_content_type(source_content_type)?;
-    let format = image::guess_format(&source_object.bytes)
-        .map_err(|error| AppError::bad_request(format!("unable to detect uploaded image format: {error}")))?;
-    let detected_content_type = content_type_for_image_format(format)
-        .ok_or_else(|| AppError::bad_request("uploaded event cover image format is not supported"))?;
+    let format = image::guess_format(&source_object.bytes).map_err(|error| {
+        AppError::bad_request(format!("unable to detect uploaded image format: {error}"))
+    })?;
+    let detected_content_type = content_type_for_image_format(format).ok_or_else(|| {
+        AppError::bad_request("uploaded event cover image format is not supported")
+    })?;
 
     if detected_content_type != normalized_content_type {
         return Err(AppError::bad_request(
@@ -1154,14 +1619,14 @@ fn process_event_cover_upload(
         ));
     }
 
-    let image = image::load_from_memory_with_format(&source_object.bytes, format)
-        .map_err(|error| AppError::bad_request(format!("failed to decode uploaded event cover image: {error}")))?;
+    let image =
+        image::load_from_memory_with_format(&source_object.bytes, format).map_err(|error| {
+            AppError::bad_request(format!("failed to decode uploaded event cover image: {error}"))
+        })?;
     let (actual_width, actual_height) = image.dimensions();
 
     if actual_width == 0 || actual_height == 0 {
-        return Err(AppError::bad_request(
-            "uploaded event cover image has invalid dimensions",
-        ));
+        return Err(AppError::bad_request("uploaded event cover image has invalid dimensions"));
     }
 
     if actual_width as i32 != reported_width || actual_height as i32 != reported_height {
@@ -1221,9 +1686,9 @@ fn resize_for_max_width(image: &DynamicImage, max_width: u32) -> DynamicImage {
 
 fn encode_png_image(image: &DynamicImage) -> Result<Vec<u8>, AppError> {
     let mut buffer = Cursor::new(Vec::new());
-    image
-        .write_to(&mut buffer, ImageFormat::Png)
-        .map_err(|error| AppError::internal(format!("failed to encode processed event image: {error}")))?;
+    image.write_to(&mut buffer, ImageFormat::Png).map_err(|error| {
+        AppError::internal(format!("failed to encode processed event image: {error}"))
+    })?;
 
     Ok(buffer.into_inner())
 }
@@ -1241,14 +1706,8 @@ async fn cleanup_uploaded_cover_variants(
     state: &SharedAppState,
     processed: &ProcessedEventCoverUpload,
 ) {
-    let _ = state
-        .object_storage
-        .delete_object(&processed.hero.object_key)
-        .await;
-    let _ = state
-        .object_storage
-        .delete_object(&processed.thumbnail.object_key)
-        .await;
+    let _ = state.object_storage.delete_object(&processed.hero.object_key).await;
+    let _ = state.object_storage.delete_object(&processed.thumbnail.object_key).await;
 }
 
 async fn cleanup_replaced_event_images(
@@ -1284,7 +1743,9 @@ fn map_refresh_token_error(error: RefreshTokenError) -> AppError {
         RefreshTokenError::RefreshTokenNotFound
         | RefreshTokenError::RefreshTokenRevoked
         | RefreshTokenError::RefreshTokenExpired
-        | RefreshTokenError::TokenSubjectMismatch { .. } => AppError::bad_request(error.to_string()),
+        | RefreshTokenError::TokenSubjectMismatch { .. } => {
+            AppError::bad_request(error.to_string())
+        }
     }
 }
 
@@ -1315,9 +1776,7 @@ impl LoginRateLimiter {
     const BLOCK_DURATION_MINUTES: i64 = 15;
 
     pub fn new() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-        }
+        Self { entries: Mutex::new(HashMap::new()) }
     }
 
     async fn check(&self, key: &str) -> Result<(), AppError> {
@@ -1325,9 +1784,9 @@ impl LoginRateLimiter {
         let now = Utc::now();
 
         match entries.get_mut(key) {
-            Some(entry) if entry.blocked_until > now => Err(AppError::bad_request(
-                "too many login attempts; please retry later",
-            )),
+            Some(entry) if entry.blocked_until > now => {
+                Err(AppError::bad_request("too many login attempts; please retry later"))
+            }
             Some(entry) => {
                 if entry.blocked_until <= now {
                     entries.remove(key);
@@ -1342,10 +1801,9 @@ impl LoginRateLimiter {
     async fn record_failure(&self, key: &str) {
         let mut entries = self.entries.lock().await;
         let now = Utc::now();
-        let entry = entries.entry(key.to_owned()).or_insert(LoginAttemptEntry {
-            failures: 0,
-            blocked_until: now,
-        });
+        let entry = entries
+            .entry(key.to_owned())
+            .or_insert(LoginAttemptEntry { failures: 0, blocked_until: now });
 
         entry.failures += 1;
         if entry.failures >= Self::FAILURE_LIMIT {
@@ -1383,9 +1841,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error
-            .to_string()
-            .contains("too many login attempts"));
+        assert!(error.to_string().contains("too many login attempts"));
     }
 
     #[tokio::test]
