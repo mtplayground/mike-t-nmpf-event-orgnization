@@ -12,13 +12,14 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - Events: hosts can create, read, update, cancel, duplicate, and list their own events through authenticated host-scoped endpoints.
 - Event fields: title, generated unique slug, markdown description, start/end time, timezone, location type/details, capacity, visibility, status, and optional cover image reference.
 - Host event lists: `GET /me/events?status=draft|upcoming|past` returns paginated event rows with attendee counts and pagination metadata.
-- Public discovery: `GET /events` lists upcoming public published events with search/date/cursor filters and thumbnail metadata; `GET /events/{slug}` returns event detail, minimal host profile, attendee count, capacity remaining, and the authenticated user's registration state when available.
+- Public discovery: `GET /events` lists upcoming public published events with search/date/cursor filters and thumbnail metadata; `GET /public/events/{slug}` returns event detail, minimal host profile, attendee count, capacity remaining, and the authenticated user's registration state when available.
 - Event cover images: backend issues presigned upload URLs for owned events, validates uploaded image content, generates hero and thumbnail PNG variants, stores image metadata, and cleans up replaced variants.
 - Registrations: backend has a `registrations` table and repository model with unique `(event_id, user_id)`, `registered`/`cancelled` states, row-lock-based capacity checks, cancellation, and re-registration support.
 - Registration email flows: attendee registration confirmation emails include calendar attachment content, and a background worker queues 24-hour event reminder emails for due active registrations.
 - Host attendee operations: hosts can list event attendees, download attendee CSV, and queue rate-limited announcement emails to currently registered attendees for their own events.
 - Attendee area: authenticated attendees can browse public events, register/cancel from event detail, and view upcoming/past registrations with pagination.
-- Frontend: React Router app shell with public auth pages, protected profile/host/attendee areas, host event dashboard, event create/edit form with cover upload, attendee discovery feed, public event detail page, attendee registration dashboard, and host attendee management page with CSV export and announcement composer.
+- Frontend: React Router app shell with explicit guest sign-in/create-account entry points, public auth pages, protected profile/host/attendee areas, host event dashboard, event create/edit form with cover upload, attendee discovery feed, public event detail page, attendee registration dashboard, and host attendee management page with CSV export and announcement composer.
+- Auth hardening: frontend login blocks common insecure default credential probes before issuing a login request.
 - Frontend resilience: the app has a global React error boundary, route-level error UI, and shared status/loading/empty-state panels used by key host and attendee views.
 - Testing: frontend includes a Playwright E2E suite covering registration, verification, event creation with cover, publishing, attendee registration/cancellation, host CSV export, and announcements.
 - Deployment packaging: the repo includes scripts for building the backend release binary and frontend static bundle, a sample nginx config for serving the frontend and proxying `/api`, and a production environment checklist.
@@ -30,6 +31,7 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - API responses use `{ "data": ... }`; errors use `{ "error": { "code", "message", "fields?" } }`.
 - Authenticated routes use bearer access tokens and a current-user extractor.
 - Host event ownership is enforced by filtering event reads/writes, attendee exports, and announcement sends by authenticated host id.
+- Public event detail uses a distinct `/public/events/{slug}` API route to avoid conflicts with authenticated event id routes.
 - Object uploads use presigned URLs; the API confirms uploaded objects before persisting references or derived assets.
 - Registration capacity enforcement locks the target event row before counting active registrations.
 - HTTP requests receive or reuse an `x-request-id`; structured tracing records request id, method, path, status, latency, and authenticated user id when available.
