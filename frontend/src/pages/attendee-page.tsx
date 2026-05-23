@@ -12,6 +12,7 @@ import {
   MapPin,
   RefreshCw,
   Search,
+  XCircle,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
@@ -19,8 +20,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { requestJson } from '@/lib/api-client';
+import { useAuthStore } from '@/stores/auth-store';
 
 type EventLocationType = 'in_person' | 'virtual' | 'hybrid';
+type EventVisibility = 'draft' | 'public' | 'unlisted' | 'private';
+type EventStatus = 'draft' | 'published' | 'cancelled' | 'completed';
+type RegistrationStatus = 'registered' | 'cancelled';
+type RegistrationBucket = 'upcoming' | 'past';
 
 type PublicEventThumbnail = {
   object_key: string;
@@ -45,9 +51,45 @@ type PublicEvent = {
   thumbnail: PublicEventThumbnail | null;
 };
 
+type AttendeeRegistrationEvent = {
+  id: string;
+  host_id: string;
+  host_display_name: string;
+  title: string;
+  slug: string;
+  description_md: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  location_type: EventLocationType;
+  location_text: string | null;
+  location_url: string | null;
+  capacity: number | null;
+  visibility: EventVisibility;
+  status: EventStatus;
+  cover_image_id: string | null;
+  cancelled_at: string | null;
+};
+
+type AttendeeRegistration = {
+  registration_id: string;
+  status: RegistrationStatus;
+  registered_at: string;
+  cancelled_at: string | null;
+  event: AttendeeRegistrationEvent;
+};
+
 type PublicEventListResponse = {
   items: PublicEvent[];
   next_cursor: string | null;
+};
+
+type RegistrationListResponse = {
+  items: AttendeeRegistration[];
+  page: number;
+  per_page: number;
+  total_count: number;
+  total_pages: number;
 };
 
 type DiscoveryFilters = {
@@ -55,7 +97,18 @@ type DiscoveryFilters = {
   fromDate: string;
 };
 
+type EventSummaryLike = Pick<
+  PublicEvent,
+  | 'end_at'
+  | 'location_text'
+  | 'location_type'
+  | 'location_url'
+  | 'start_at'
+  | 'timezone'
+>;
+
 export function AttendeePage() {
+  const refreshSession = useAuthStore((state) => state.refreshSession);
   const [queryInput, setQueryInput] = useState('');
   const [dateInput, setDateInput] = useState('');
   const [filters, setFilters] = useState<DiscoveryFilters>({
@@ -68,6 +121,22 @@ export function AttendeePage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [registrationBucket, setRegistrationBucket] =
+    useState<RegistrationBucket>('upcoming');
+  const [registrations, setRegistrations] = useState<AttendeeRegistration[]>(
+    [],
+  );
+  const [registrationPage, setRegistrationPage] = useState(1);
+  const [registrationTotalPages, setRegistrationTotalPages] = useState(0);
+  const [registrationTotalCount, setRegistrationTotalCount] = useState(0);
+  const [registrationsLoading, setRegistrationsLoading] = useState(true);
+  const [registrationsLoadingMore, setRegistrationsLoadingMore] =
+    useState(false);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [dashboardMessage, setDashboardMessage] = useState<string | null>(null);
+  const [cancellingRegistrationId, setCancellingRegistrationId] = useState<
+    string | null
+  >(null);
 
   const fetchEvents = useCallback(
     async (options: { cursor?: string | null; replace: boolean }) => {
@@ -104,9 +173,71 @@ export function AttendeePage() {
     [filters],
   );
 
+  const fetchRegistrations = useCallback(
+    async (options: {
+      bucket: RegistrationBucket;
+      page: number;
+      replace: boolean;
+    }) => {
+      const { bucket, page, replace } = options;
+
+      if (replace) {
+        setRegistrationsLoading(true);
+      } else {
+        setRegistrationsLoadingMore(true);
+      }
+      setDashboardError(null);
+
+      try {
+        const refreshed = await refreshSession();
+        const session = useAuthStore.getState().session;
+
+        if (!refreshed || !session) {
+          throw new Error('You must be signed in to view registrations.');
+        }
+
+        const params = new URLSearchParams({
+          bucket,
+          page: String(page),
+          per_page: '6',
+        });
+        const data = await requestJson<RegistrationListResponse>(
+          `/me/registrations?${params.toString()}`,
+          { token: session.accessToken },
+        );
+
+        setRegistrations((current) =>
+          replace ? data.items : mergeRegistrations(current, data.items),
+        );
+        setRegistrationPage(data.page);
+        setRegistrationTotalPages(data.total_pages);
+        setRegistrationTotalCount(data.total_count);
+      } catch (loadError) {
+        setDashboardError(
+          readError(loadError, 'Unable to load registered events.'),
+        );
+      } finally {
+        if (replace) {
+          setRegistrationsLoading(false);
+        } else {
+          setRegistrationsLoadingMore(false);
+        }
+      }
+    },
+    [refreshSession],
+  );
+
   useEffect(() => {
     void fetchEvents({ replace: true });
   }, [fetchEvents]);
+
+  useEffect(() => {
+    void fetchRegistrations({
+      bucket: registrationBucket,
+      page: 1,
+      replace: true,
+    });
+  }, [fetchRegistrations, registrationBucket]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -140,7 +271,49 @@ export function AttendeePage() {
     setFilters({ query: '', fromDate: '' });
   }
 
+  async function cancelRegistration(registration: AttendeeRegistration) {
+    const previousRegistrations = registrations;
+    const previousTotalCount = registrationTotalCount;
+
+    setDashboardError(null);
+    setDashboardMessage(null);
+    setCancellingRegistrationId(registration.registration_id);
+    setRegistrations((current) =>
+      current.filter(
+        (item) => item.registration_id !== registration.registration_id,
+      ),
+    );
+    setRegistrationTotalCount((current) => Math.max(0, current - 1));
+
+    try {
+      const refreshed = await refreshSession({ force: true });
+      const session = useAuthStore.getState().session;
+
+      if (!refreshed || !session) {
+        throw new Error('You must be signed in to cancel registration.');
+      }
+
+      await requestJson(`/events/${registration.event.id}/register`, {
+        method: 'DELETE',
+        token: session.accessToken,
+      });
+
+      setDashboardMessage(
+        `Registration cancelled for ${registration.event.title}.`,
+      );
+    } catch (cancelError) {
+      setRegistrations(previousRegistrations);
+      setRegistrationTotalCount(previousTotalCount);
+      setDashboardError(
+        readError(cancelError, 'Unable to cancel this registration.'),
+      );
+    } finally {
+      setCancellingRegistrationId(null);
+    }
+  }
+
   const hasFilters = filters.query !== '' || filters.fromDate !== '';
+  const canLoadMoreRegistrations = registrationPage < registrationTotalPages;
 
   return (
     <section className="space-y-6">
@@ -172,6 +345,27 @@ export function AttendeePage() {
           </Button>
         </div>
       </div>
+
+      <RegistrationDashboard
+        bucket={registrationBucket}
+        canLoadMore={canLoadMoreRegistrations}
+        cancellingRegistrationId={cancellingRegistrationId}
+        error={dashboardError}
+        loading={registrationsLoading}
+        loadingMore={registrationsLoadingMore}
+        message={dashboardMessage}
+        onBucketChange={setRegistrationBucket}
+        onCancel={(registration) => void cancelRegistration(registration)}
+        onLoadMore={() =>
+          void fetchRegistrations({
+            bucket: registrationBucket,
+            page: registrationPage + 1,
+            replace: false,
+          })
+        }
+        registrations={registrations}
+        totalCount={registrationTotalCount}
+      />
 
       <Card>
         <CardContent className="space-y-5 pt-6">
@@ -303,6 +497,220 @@ function DiscoveryEventCard({ event }: { event: PublicEvent }) {
   );
 }
 
+function RegistrationDashboard({
+  bucket,
+  canLoadMore,
+  cancellingRegistrationId,
+  error,
+  loading,
+  loadingMore,
+  message,
+  onBucketChange,
+  onCancel,
+  onLoadMore,
+  registrations,
+  totalCount,
+}: {
+  bucket: RegistrationBucket;
+  canLoadMore: boolean;
+  cancellingRegistrationId: string | null;
+  error: string | null;
+  loading: boolean;
+  loadingMore: boolean;
+  message: string | null;
+  onBucketChange: (bucket: RegistrationBucket) => void;
+  onCancel: (registration: AttendeeRegistration) => void;
+  onLoadMore: () => void;
+  registrations: AttendeeRegistration[];
+  totalCount: number;
+}) {
+  return (
+    <Card>
+      <CardContent className="space-y-5 pt-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+              My registrations
+            </p>
+            <h3 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+              Registered events
+            </h3>
+          </div>
+          <div className="flex rounded-full border border-border/70 bg-secondary/40 p-1">
+            {(['upcoming', 'past'] as RegistrationBucket[]).map((item) => (
+              <button
+                className={[
+                  'rounded-full px-4 py-2 text-sm font-medium transition',
+                  bucket === item
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground',
+                ].join(' ')}
+                key={item}
+                onClick={() => onBucketChange(item)}
+                type="button"
+              >
+                {item === 'upcoming' ? 'Upcoming' : 'Past'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {message ? <InlineStatus body={message} tone="success" /> : null}
+        {error ? <InlineStatus body={error} tone="error" /> : null}
+
+        <div className="text-sm text-muted-foreground">
+          {loading
+            ? 'Loading registrations...'
+            : `${totalCount} ${bucket} registration${totalCount === 1 ? '' : 's'}`}
+        </div>
+
+        {loading ? <RegistrationListSkeleton /> : null}
+
+        {!loading && registrations.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-5 text-sm text-muted-foreground">
+            {bucket === 'upcoming'
+              ? 'No upcoming registered events yet.'
+              : 'No past registered events yet.'}
+          </div>
+        ) : null}
+
+        {!loading && registrations.length > 0 ? (
+          <div className="grid gap-3">
+            {registrations.map((registration) => (
+              <RegistrationCard
+                bucket={bucket}
+                cancelling={
+                  cancellingRegistrationId === registration.registration_id
+                }
+                key={registration.registration_id}
+                onCancel={() => onCancel(registration)}
+                registration={registration}
+              />
+            ))}
+          </div>
+        ) : null}
+
+        {canLoadMore ? (
+          <Button
+            disabled={loadingMore}
+            onClick={onLoadMore}
+            type="button"
+            variant="outline"
+          >
+            {loadingMore ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            Load more registrations
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RegistrationCard({
+  bucket,
+  cancelling,
+  onCancel,
+  registration,
+}: {
+  bucket: RegistrationBucket;
+  cancelling: boolean;
+  onCancel: () => void;
+  registration: AttendeeRegistration;
+}) {
+  const event = registration.event;
+
+  return (
+    <article className="rounded-2xl border border-border/70 bg-background/70 p-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full border border-border/70 bg-secondary/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+              {bucket === 'upcoming' ? 'Upcoming' : 'Past'}
+            </span>
+            <span className="rounded-full border border-border/70 bg-secondary/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+              {event.host_display_name}
+            </span>
+          </div>
+          <div>
+            <h4 className="truncate text-lg font-semibold text-foreground">
+              {event.title}
+            </h4>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {durationSummary(event)}
+            </p>
+            <p className="mt-1 line-clamp-1 text-sm text-muted-foreground">
+              {locationSummary(event)}
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <Button asChild size="sm" variant="outline">
+            <Link to={`/events/${event.slug}`}>Details</Link>
+          </Button>
+          {bucket === 'upcoming' ? (
+            <Button
+              disabled={cancelling}
+              onClick={onCancel}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              {cancelling ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : (
+                <XCircle className="h-4 w-4" />
+              )}
+              Cancel
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function RegistrationListSkeleton() {
+  return (
+    <div className="grid gap-3">
+      {Array.from({ length: 3 }).map((_, index) => (
+        <div
+          className="rounded-2xl border border-border/70 bg-background/70 p-4"
+          key={index}
+        >
+          <div className="h-4 w-32 animate-pulse rounded bg-muted" />
+          <div className="mt-3 h-6 w-2/3 animate-pulse rounded bg-muted" />
+          <div className="mt-3 h-4 w-1/2 animate-pulse rounded bg-muted" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function InlineStatus({
+  body,
+  tone,
+}: {
+  body: string;
+  tone: 'success' | 'error';
+}) {
+  return (
+    <div
+      className={[
+        'rounded-2xl border p-4 text-sm leading-6',
+        tone === 'success'
+          ? 'border-emerald-300/60 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100'
+          : 'border-rose-300/60 bg-rose-500/10 text-rose-900 dark:text-rose-100',
+      ].join(' ')}
+    >
+      {body}
+    </div>
+  );
+}
+
 function EventThumbnail({ event }: { event: PublicEvent }) {
   const publicUrl = event.thumbnail?.public_url;
 
@@ -392,6 +800,25 @@ function mergeEvents(current: PublicEvent[], next: PublicEvent[]) {
   return merged;
 }
 
+function mergeRegistrations(
+  current: AttendeeRegistration[],
+  next: AttendeeRegistration[],
+) {
+  const seen = new Set(
+    current.map((registration) => registration.registration_id),
+  );
+  const merged = [...current];
+
+  for (const registration of next) {
+    if (!seen.has(registration.registration_id)) {
+      merged.push(registration);
+      seen.add(registration.registration_id);
+    }
+  }
+
+  return merged;
+}
+
 function activeFilterSummary(filters: DiscoveryFilters) {
   const parts = [];
 
@@ -419,11 +846,11 @@ function formatDate(value: string) {
   );
 }
 
-function durationSummary(event: PublicEvent) {
+function durationSummary(event: EventSummaryLike) {
   return `${formatDateTime(event.start_at)} - ${formatDateTime(event.end_at)} (${event.timezone})`;
 }
 
-function locationSummary(event: PublicEvent) {
+function locationSummary(event: EventSummaryLike) {
   if (event.location_type === 'virtual') {
     return event.location_url ?? 'Virtual event';
   }
