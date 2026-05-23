@@ -6,6 +6,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth-store';
 
+const blockedDefaultCredentials = new Set([
+  'admin@example.com:change-me',
+  'admin@example.com:password',
+  'admin:change-me',
+]);
+
 export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -21,6 +27,15 @@ export function LoginPage() {
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     clearError();
+
+    const credentialKey = `${email.trim().toLowerCase()}:${password}`;
+    if (blockedDefaultCredentials.has(credentialKey)) {
+      useAuthStore.setState({
+        lastError: 'Default credentials are not accepted.',
+      });
+      return;
+    }
+
     setSubmitting(true);
 
     try {
