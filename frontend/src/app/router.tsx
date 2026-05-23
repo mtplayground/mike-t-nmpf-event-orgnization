@@ -2,6 +2,7 @@ import { createBrowserRouter } from 'react-router-dom';
 
 import { ProtectedRoute } from '@/components/protected-route';
 import { RootLayout } from '@/components/root-layout';
+import { RouteErrorPage } from '@/components/route-error-page';
 import { AttendeePage } from '@/pages/attendee-page';
 import { AuthPage } from '@/pages/auth-page';
 import { EventDetailPage } from '@/pages/event-detail-page';
@@ -21,17 +22,43 @@ export const router = createBrowserRouter([
   {
     path: '/',
     element: <RootLayout />,
+    errorElement: <RouteErrorPage />,
     children: [
-      { index: true, element: <HomePage /> },
-      { path: 'auth', element: <AuthPage /> },
-      { path: 'auth/login', element: <LoginPage /> },
-      { path: 'auth/register', element: <RegisterPage /> },
-      { path: 'auth/verify-email', element: <VerifyEmailPage /> },
-      { path: 'auth/forgot-password', element: <ForgotPasswordPage /> },
-      { path: 'auth/reset-password', element: <ResetPasswordPage /> },
-      { path: 'events/:slug', element: <EventDetailPage /> },
+      { index: true, element: <HomePage />, errorElement: <RouteErrorPage /> },
+      { path: 'auth', element: <AuthPage />, errorElement: <RouteErrorPage /> },
+      {
+        path: 'auth/login',
+        element: <LoginPage />,
+        errorElement: <RouteErrorPage />,
+      },
+      {
+        path: 'auth/register',
+        element: <RegisterPage />,
+        errorElement: <RouteErrorPage />,
+      },
+      {
+        path: 'auth/verify-email',
+        element: <VerifyEmailPage />,
+        errorElement: <RouteErrorPage />,
+      },
+      {
+        path: 'auth/forgot-password',
+        element: <ForgotPasswordPage />,
+        errorElement: <RouteErrorPage />,
+      },
+      {
+        path: 'auth/reset-password',
+        element: <ResetPasswordPage />,
+        errorElement: <RouteErrorPage />,
+      },
+      {
+        path: 'events/:slug',
+        element: <EventDetailPage />,
+        errorElement: <RouteErrorPage />,
+      },
       {
         path: 'profile',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <ProfilePage />
@@ -40,6 +67,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'host',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <HostPage />
@@ -48,6 +76,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'host/events/new',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <HostEventFormPage mode="create" />
@@ -56,6 +85,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'host/events/:eventId/edit',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <HostEventFormPage mode="edit" />
@@ -64,6 +94,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'host/events/:eventId/attendees',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <HostEventAttendeesPage />
@@ -72,13 +103,18 @@ export const router = createBrowserRouter([
       },
       {
         path: 'attendee',
+        errorElement: <RouteErrorPage />,
         element: (
           <ProtectedRoute>
             <AttendeePage />
           </ProtectedRoute>
         ),
       },
-      { path: '*', element: <NotFoundPage /> },
+      {
+        path: '*',
+        element: <NotFoundPage />,
+        errorElement: <RouteErrorPage />,
+      },
     ],
   },
 ]);

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 
 import { RouteCard } from '@/components/route-card';
+import { LoadingState } from '@/components/state-panels';
 import { useAuthStore } from '@/stores/auth-store';
 
 type ProtectedRouteProps = {
@@ -21,9 +22,10 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         title="Checking your session"
         description="Protected pages wait for the auth store to restore or refresh your session before rendering."
       >
-        <div className="rounded-2xl border border-dashed border-border/70 p-5 text-sm text-muted-foreground">
-          Confirming your access token and user context.
-        </div>
+        <LoadingState
+          body="Confirming your access token and user context."
+          title="Restoring session"
+        />
       </RouteCard>
     );
   }
