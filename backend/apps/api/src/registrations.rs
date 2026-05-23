@@ -448,6 +448,8 @@ mod tests {
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("INNER JOIN users"));
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("registrations.event_id = $1"));
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("users.email"));
+        assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("ORDER BY registrations.registered_at"));
+        assert!(!LIST_ATTENDEES_FOR_EVENT_SQL.contains("registrations.status = 'registered'"));
         assert!(
             LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL.contains("registrations.status = 'registered'")
         );
