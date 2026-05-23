@@ -69,7 +69,16 @@ export function RootLayout() {
                 >
                   Sign out
                 </Button>
-              ) : null}
+              ) : (
+                <>
+                  <Button asChild variant="outline" size="sm">
+                    <NavLink to="/auth/login">Sign in</NavLink>
+                  </Button>
+                  <Button asChild size="sm">
+                    <NavLink to="/auth/register">Create account</NavLink>
+                  </Button>
+                </>
+              )}
               <Button variant="outline" size="sm" onClick={toggleTheme}>
                 {theme === 'light' ? (
                   <MoonStar className="h-4 w-4" />
