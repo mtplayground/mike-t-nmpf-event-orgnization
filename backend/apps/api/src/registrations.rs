@@ -225,6 +225,10 @@ pub const EVENT_CAPACITY_LOCK_SQL: &str = r#"
         capacity
     FROM events
     WHERE id = $1
+      AND visibility = 'public'
+      AND status = 'published'
+      AND cancelled_at IS NULL
+      AND end_at >= NOW()
     FOR UPDATE
 "#;
 
@@ -357,6 +361,10 @@ mod tests {
     fn registration_capacity_checks_lock_event_and_existing_registration_rows() {
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("FOR UPDATE"));
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("WHERE id = $1"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("visibility = 'public'"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("status = 'published'"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("cancelled_at IS NULL"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("end_at >= NOW()"));
         assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("FOR UPDATE"));
         assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("event_id = $1"));
         assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("user_id = $2"));

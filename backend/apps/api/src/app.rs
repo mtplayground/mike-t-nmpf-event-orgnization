@@ -471,6 +471,16 @@ struct AnnouncementResponse {
     recipient_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct RegistrationResponse {
+    id: Uuid,
+    event_id: Uuid,
+    user_id: Uuid,
+    status: registrations::RegistrationStatus,
+    registered_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PublicEventsQuery {
     query: Option<String>,
@@ -562,6 +572,10 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/events/{id}/attendees", get(list_event_attendees))
         .route("/events/{id}/attendees.csv", get(download_event_attendees_csv))
         .route("/events/{id}/announce", post(send_event_announcement))
+        .route(
+            "/events/{id}/register",
+            post(register_for_event).delete(cancel_event_registration),
+        )
         .route("/events/{id}/duplicate", post(duplicate_event))
         .route("/events/{id}/cover/upload-url", post(create_event_cover_upload_url))
         .route("/events/{id}/cover/confirm", post(confirm_event_cover_upload))
@@ -1194,6 +1208,45 @@ async fn send_event_announcement(
     })))
 }
 
+async fn register_for_event(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<RegistrationResponse>>, AppError> {
+    match registrations::register_for_event(&state.db_pool, event_id, current_user.id)
+        .await
+        .map_err(AppError::from)?
+    {
+        (registrations::RegistrationInsertOutcome::Registered, Some(registration)) => Ok(Json(
+            ApiResponse::new(build_registration_response(registration)),
+        )),
+        (registrations::RegistrationInsertOutcome::CapacityFull, None) => {
+            Err(AppError::conflict("event capacity has been reached"))
+        }
+        (registrations::RegistrationInsertOutcome::EventNotFound, None) => {
+            Err(AppError::not_found("event was not found"))
+        }
+        (registrations::RegistrationInsertOutcome::Registered, None)
+        | (registrations::RegistrationInsertOutcome::CapacityFull, Some(_))
+        | (registrations::RegistrationInsertOutcome::EventNotFound, Some(_)) => {
+            Err(AppError::internal("registration operation returned an invalid state"))
+        }
+    }
+}
+
+async fn cancel_event_registration(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<RegistrationResponse>>, AppError> {
+    let registration = registrations::cancel_registration(&state.db_pool, event_id, current_user.id)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found("registration was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_registration_response(registration))))
+}
+
 async fn update_event(
     State(state): State<SharedAppState>,
     Path(event_id): Path<Uuid>,
@@ -1630,6 +1683,17 @@ fn build_host_event_attendee_response(
         status: row.status,
         registered_at: row.registered_at,
         cancelled_at: row.cancelled_at,
+    }
+}
+
+fn build_registration_response(registration: registrations::Registration) -> RegistrationResponse {
+    RegistrationResponse {
+        id: registration.id,
+        event_id: registration.event_id,
+        user_id: registration.user_id,
+        status: registration.status,
+        registered_at: registration.registered_at,
+        cancelled_at: registration.cancelled_at,
     }
 }
 
