@@ -129,11 +129,17 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let code = self.code();
+        let message = self.message();
+        let fields = self.fields();
+
+        log_error_response(status, code, &message, &self);
+
         let response = ErrorResponse {
             error: ErrorEnvelope {
-                code: self.code(),
-                message: self.message(),
-                fields: self.fields(),
+                code,
+                message,
+                fields,
             },
         };
 
@@ -155,7 +161,15 @@ impl From<ValidationErrors> for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(value: sqlx::Error) -> Self {
-        Self::Database(value)
+        match value {
+            sqlx::Error::RowNotFound => Self::NotFound {
+                message: "resource was not found".to_owned(),
+            },
+            error if is_unique_violation(&error) => Self::Conflict {
+                message: "resource already exists".to_owned(),
+            },
+            error => Self::Database(error),
+        }
     }
 }
 
@@ -213,5 +227,48 @@ fn default_validation_message(
                 "is invalid".to_owned()
             }
         }
+    }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .as_deref()
+        == Some("23505")
+}
+
+fn log_error_response(status: StatusCode, code: &'static str, message: &str, error: &AppError) {
+    if status.is_server_error() {
+        tracing::error!(
+            status = status.as_u16(),
+            error_code = code,
+            error_message = %message,
+            error = %error,
+            "request failed"
+        );
+        return;
+    }
+
+    tracing::warn!(
+        status = status.as_u16(),
+        error_code = code,
+        error_message = %message,
+        "request rejected"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::IntoResponse;
+    use http::StatusCode;
+
+    use super::AppError;
+
+    #[test]
+    fn row_not_found_maps_to_not_found_response() {
+        let response = AppError::from(sqlx::Error::RowNotFound).into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
