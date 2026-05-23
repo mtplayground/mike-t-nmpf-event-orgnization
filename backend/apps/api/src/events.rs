@@ -111,6 +111,31 @@ pub struct HostEventListRow {
     pub attendee_count: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublicEventCursor {
+    pub start_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct PublicEventListRow {
+    pub id: Uuid,
+    pub title: String,
+    pub slug: String,
+    pub description_md: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+    pub location_type: EventLocationType,
+    pub location_text: Option<String>,
+    pub location_url: Option<String>,
+    pub capacity: Option<i32>,
+    pub thumbnail_object_key: Option<String>,
+    pub thumbnail_width: Option<i32>,
+    pub thumbnail_height: Option<i32>,
+    pub thumbnail_bytes: Option<i64>,
+}
+
 pub async fn insert_event(pool: &PgPool, event: &NewEvent) -> Result<Event, sqlx::Error> {
     sqlx::query_as::<_, Event>(
         r#"
@@ -185,6 +210,29 @@ pub async fn insert_event(pool: &PgPool, event: &NewEvent) -> Result<Event, sqlx
     .bind(event.cover_image_id)
     .fetch_one(pool)
     .await
+}
+
+pub async fn list_public_events(
+    pool: &PgPool,
+    query: Option<&str>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    cursor: Option<PublicEventCursor>,
+    limit: i64,
+) -> Result<Vec<PublicEventListRow>, sqlx::Error> {
+    let search_query = query.map(str::trim).filter(|value| !value.is_empty());
+    let cursor_start_at = cursor.as_ref().map(|cursor| cursor.start_at);
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id);
+
+    sqlx::query_as::<_, PublicEventListRow>(PUBLIC_EVENT_LIST_SQL)
+        .bind(search_query)
+        .bind(from)
+        .bind(to)
+        .bind(cursor_start_at)
+        .bind(cursor_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn list_events_for_host(
@@ -445,6 +493,48 @@ const EVENT_SELECT_BY_ID_AND_HOST: &str = r#"
       AND host_id = $2
 "#;
 
+const PUBLIC_EVENT_LIST_SQL: &str = r#"
+    SELECT
+        events.id,
+        events.title,
+        events.slug,
+        events.description_md,
+        events.start_at,
+        events.end_at,
+        events.timezone,
+        events.location_type,
+        events.location_text,
+        events.location_url,
+        events.capacity,
+        thumbnail.object_key AS thumbnail_object_key,
+        thumbnail.width AS thumbnail_width,
+        thumbnail.height AS thumbnail_height,
+        thumbnail.bytes AS thumbnail_bytes
+    FROM events
+    LEFT JOIN event_images AS thumbnail
+      ON thumbnail.event_id = events.id
+     AND thumbnail.variant = 'thumbnail'
+    WHERE events.visibility = 'public'
+      AND events.status = 'published'
+      AND events.cancelled_at IS NULL
+      AND events.end_at >= NOW()
+      AND (
+          $1::TEXT IS NULL
+          OR events.title ILIKE '%' || $1 || '%'
+          OR events.description_md ILIKE '%' || $1 || '%'
+          OR events.location_text ILIKE '%' || $1 || '%'
+      )
+      AND ($2::TIMESTAMPTZ IS NULL OR events.start_at >= $2)
+      AND ($3::TIMESTAMPTZ IS NULL OR events.start_at <= $3)
+      AND (
+          $4::TIMESTAMPTZ IS NULL
+          OR events.start_at > $4
+          OR (events.start_at = $4 AND events.id > $5::UUID)
+      )
+    ORDER BY events.start_at ASC, events.id ASC
+    LIMIT $6
+"#;
+
 const UPDATE_EVENT_FOR_HOST_SQL: &str = r#"
     UPDATE events
     SET
@@ -680,8 +770,8 @@ mod tests {
 
     use super::{
         CANCEL_EVENT_FOR_HOST_SQL, EVENT_SELECT_BY_ID_AND_HOST, Event, EventLocationType,
-        EventStatus, EventVisibility, HostEventListFilter, UPDATE_EVENT_FOR_HOST_SQL,
-        duplicate_event_template, host_event_list_filter_sql,
+        EventStatus, EventVisibility, HostEventListFilter, PUBLIC_EVENT_LIST_SQL,
+        UPDATE_EVENT_FOR_HOST_SQL, duplicate_event_template, host_event_list_filter_sql,
     };
 
     #[test]
@@ -779,6 +869,16 @@ mod tests {
             host_event_list_filter_sql(HostEventListFilter::Past),
             "(status = 'completed' OR (status = 'published' AND end_at < NOW()))"
         );
+    }
+
+    #[test]
+    fn public_event_list_query_filters_to_public_upcoming_events_with_thumbnail_join() {
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("events.visibility = 'public'"));
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("events.status = 'published'"));
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("events.cancelled_at IS NULL"));
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("events.end_at >= NOW()"));
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("thumbnail.variant = 'thumbnail'"));
+        assert!(PUBLIC_EVENT_LIST_SQL.contains("ORDER BY events.start_at ASC, events.id ASC"));
     }
 
     fn event_fixture(

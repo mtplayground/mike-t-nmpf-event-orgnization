@@ -6,7 +6,7 @@ use axum::{
     middleware,
     routing::{get, post},
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use http::{HeaderValue, Method};
 use image::{DynamicImage, GenericImageView, ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,7 @@ const EVENT_COVER_SOURCE_MAX_SIZE_BYTES: i64 = 10 * 1024 * 1024;
 const EVENT_COVER_UPLOAD_URL_TTL_SECONDS: u64 = 900;
 const EVENT_COVER_HERO_MAX_WIDTH: u32 = 1200;
 const EVENT_COVER_THUMBNAIL_MAX_WIDTH: u32 = 480;
+const PUBLIC_EVENT_PAGE_SIZE: usize = 20;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -429,6 +430,44 @@ struct HostEventListItemResponse {
     cancelled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicEventsQuery {
+    query: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEventListResponse {
+    items: Vec<PublicEventResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEventResponse {
+    id: Uuid,
+    title: String,
+    slug: String,
+    description_md: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_type: EventLocationType,
+    location_text: Option<String>,
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    thumbnail: Option<PublicEventThumbnailResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEventThumbnailResponse {
+    object_key: String,
+    width: i32,
+    height: i32,
+    bytes: i64,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
@@ -456,6 +495,7 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/reset-password", post(reset_password))
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
+        .route("/events", get(list_public_events))
         .route("/validation-probe", post(validation_probe))
         .merge(protected_routes)
         .with_state(state)
@@ -486,6 +526,39 @@ async fn validation_probe(
         accepted: true,
         display_name: payload.display_name.clone(),
     })))
+}
+
+async fn list_public_events(
+    State(state): State<SharedAppState>,
+    Query(query): Query<PublicEventsQuery>,
+) -> Result<Json<ApiResponse<PublicEventListResponse>>, AppError> {
+    let search_query = normalize_public_search_query(query.query.as_deref())?;
+    let from = parse_optional_public_datetime(query.from.as_deref(), "from")?;
+    let to = parse_optional_public_datetime(query.to.as_deref(), "to")?;
+    validate_public_event_time_range(from, to)?;
+    let cursor = parse_public_event_cursor(query.cursor.as_deref())?;
+    let limit = PUBLIC_EVENT_PAGE_SIZE + 1;
+    let mut rows = events::list_public_events(
+        &state.db_pool,
+        search_query.as_deref(),
+        from,
+        to,
+        cursor,
+        limit as i64,
+    )
+    .await
+    .map_err(AppError::from)?;
+    let has_next_page = rows.len() > PUBLIC_EVENT_PAGE_SIZE;
+
+    if has_next_page {
+        rows.truncate(PUBLIC_EVENT_PAGE_SIZE);
+    }
+
+    let next_cursor =
+        if has_next_page { rows.last().map(public_event_cursor_for_row) } else { None };
+    let items = rows.into_iter().map(build_public_event_response).collect();
+
+    Ok(Json(ApiResponse::new(PublicEventListResponse { items, next_cursor })))
 }
 
 async fn register(
@@ -1362,6 +1435,30 @@ fn build_host_event_list_item_response(row: events::HostEventListRow) -> HostEve
     }
 }
 
+fn build_public_event_response(row: events::PublicEventListRow) -> PublicEventResponse {
+    let thumbnail = row.thumbnail_object_key.map(|object_key| PublicEventThumbnailResponse {
+        object_key,
+        width: row.thumbnail_width.unwrap_or_default(),
+        height: row.thumbnail_height.unwrap_or_default(),
+        bytes: row.thumbnail_bytes.unwrap_or_default(),
+    });
+
+    PublicEventResponse {
+        id: row.id,
+        title: row.title,
+        slug: row.slug,
+        description_md: row.description_md,
+        start_at: row.start_at,
+        end_at: row.end_at,
+        timezone: row.timezone,
+        location_type: row.location_type,
+        location_text: row.location_text,
+        location_url: row.location_url,
+        capacity: row.capacity,
+        thumbnail,
+    }
+}
+
 async fn require_host_event(
     state: &SharedAppState,
     event_id: Uuid,
@@ -1396,6 +1493,67 @@ fn validate_pagination(page: i64, per_page: i64) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn normalize_public_search_query(value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+
+    if value.len() > 200 {
+        return Err(AppError::bad_request("query must be 200 characters or fewer"));
+    }
+
+    Ok(Some(value))
+}
+
+fn parse_optional_public_datetime(
+    value: Option<&str>,
+    field_name: &'static str,
+) -> Result<Option<DateTime<Utc>>, AppError> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+
+    DateTime::parse_from_rfc3339(&value)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|_| AppError::bad_request(format!("{field_name} must be an RFC3339 timestamp")))
+}
+
+fn validate_public_event_time_range(
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<(), AppError> {
+    if matches!((from, to), (Some(from), Some(to)) if to < from) {
+        return Err(AppError::bad_request("to must be at or after from"));
+    }
+
+    Ok(())
+}
+
+fn parse_public_event_cursor(
+    value: Option<&str>,
+) -> Result<Option<events::PublicEventCursor>, AppError> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+
+    if value.len() > 128 {
+        return Err(AppError::bad_request("cursor is too long"));
+    }
+
+    let (start_at, event_id) =
+        value.split_once('|').ok_or_else(|| AppError::bad_request("cursor is invalid"))?;
+    let start_at = DateTime::parse_from_rfc3339(start_at)
+        .map_err(|_| AppError::bad_request("cursor is invalid"))?
+        .with_timezone(&Utc);
+    let id = Uuid::parse_str(event_id).map_err(|_| AppError::bad_request("cursor is invalid"))?;
+
+    Ok(Some(events::PublicEventCursor { start_at, id }))
+}
+
+fn public_event_cursor_for_row(row: &events::PublicEventListRow) -> String {
+    format!("{}|{}", row.start_at.to_rfc3339_opts(SecondsFormat::Micros, true), row.id)
 }
 
 fn normalize_required_text(value: &str, field_name: &'static str) -> Result<String, AppError> {
