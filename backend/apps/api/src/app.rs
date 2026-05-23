@@ -32,6 +32,7 @@ use crate::{
     extract::{CurrentUser, ValidatedJson},
     object_storage::{ObjectMetadata, ObjectStorageError},
     password_reset::{PasswordResetError, PasswordResetService},
+    registrations,
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
     users::{self, NewUser},
 };
@@ -617,11 +618,18 @@ async fn read_public_event(
         .await
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found("event was not found"))?;
+    let current_user_registration_state = match current_user_id {
+        Some(user_id) => registrations::find_registration_for_user(&state.db_pool, row.id, user_id)
+            .await
+            .map_err(AppError::from)?
+            .map(|registration| registration.status.as_str().to_owned()),
+        None => None,
+    };
 
     Ok(Json(ApiResponse::new(build_public_event_detail_response(
         row,
         &state,
-        current_user_id,
+        current_user_registration_state,
     ))))
 }
 
@@ -1530,7 +1538,7 @@ fn build_public_event_response(
 fn build_public_event_detail_response(
     row: events::PublicEventDetailRow,
     state: &SharedAppState,
-    _current_user_id: Option<Uuid>,
+    current_user_registration_state: Option<String>,
 ) -> PublicEventDetailResponse {
     let attendee_count = row.attendee_count;
     let capacity_remaining = public_event_capacity_remaining(row.capacity, attendee_count);
@@ -1571,7 +1579,7 @@ fn build_public_event_detail_response(
         },
         attendee_count,
         capacity_remaining,
-        current_user_registration_state: None,
+        current_user_registration_state,
     }
 }
 

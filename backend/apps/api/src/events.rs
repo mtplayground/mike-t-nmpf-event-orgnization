@@ -302,7 +302,12 @@ pub async fn list_events_for_host(
             created_at,
             updated_at,
             cancelled_at,
-            0::BIGINT AS attendee_count
+            (
+                SELECT COUNT(*)::BIGINT
+                FROM registrations
+                WHERE registrations.event_id = events.id
+                  AND registrations.status = 'registered'
+            ) AS attendee_count
         FROM events
         WHERE host_id = $1
           AND {}
@@ -596,7 +601,12 @@ const PUBLIC_EVENT_DETAIL_SQL: &str = r#"
         events.cancelled_at,
         users.display_name AS host_display_name,
         users.avatar_object_key AS host_avatar_object_key,
-        0::BIGINT AS attendee_count,
+        (
+            SELECT COUNT(*)::BIGINT
+            FROM registrations
+            WHERE registrations.event_id = events.id
+              AND registrations.status = 'registered'
+        ) AS attendee_count,
         thumbnail.object_key AS thumbnail_object_key,
         thumbnail.width AS thumbnail_width,
         thumbnail.height AS thumbnail_height,
@@ -967,7 +977,7 @@ mod tests {
         assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.status = 'published'"));
         assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.cancelled_at IS NULL"));
         assert!(PUBLIC_EVENT_DETAIL_SQL.contains("INNER JOIN users"));
-        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("0::BIGINT AS attendee_count"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("registrations.status = 'registered'"));
         assert!(PUBLIC_EVENT_DETAIL_SQL.contains("thumbnail.variant = 'thumbnail'"));
     }
 

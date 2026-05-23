@@ -12,6 +12,7 @@ mod extract;
 mod logging;
 mod object_storage;
 mod password_reset;
+mod registrations;
 mod refresh_tokens;
 mod shutdown;
 mod users;
