@@ -108,6 +108,24 @@ impl EmailService {
         .await
     }
 
+    pub async fn send_event_announcement_email(
+        &self,
+        to_email: &str,
+        display_name: &str,
+        event_title: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<(), EmailError> {
+        self.enqueue(EmailTemplate::EventAnnouncement {
+            to_email: to_email.to_owned(),
+            display_name: display_name.to_owned(),
+            event_title: event_title.to_owned(),
+            subject: subject.to_owned(),
+            body: body.to_owned(),
+        })
+        .await
+    }
+
     async fn enqueue(&self, template: EmailTemplate) -> Result<(), EmailError> {
         self.sender
             .try_send(EmailJob { template })
@@ -149,6 +167,13 @@ enum EmailTemplate {
         event_title: String,
         starts_at: DateTime<Utc>,
         location: Option<String>,
+    },
+    EventAnnouncement {
+        to_email: String,
+        display_name: String,
+        event_title: String,
+        subject: String,
+        body: String,
     },
 }
 
@@ -329,8 +354,40 @@ impl EmailTemplate {
                     html_body,
                 }
             }
+            Self::EventAnnouncement {
+                to_email,
+                display_name,
+                event_title,
+                subject,
+                body,
+            } => {
+                let subject = format!("{event_title}: {subject}");
+                let text_body = format!("Hi {display_name},\n\n{body}\n");
+                let html_body = format!(
+                    "<p>Hi {},</p><p>{}</p>",
+                    escape_html(&display_name),
+                    escape_html(&body).replace('\n', "<br>")
+                );
+
+                RenderedEmail {
+                    to_email,
+                    recipient_name: display_name,
+                    subject,
+                    text_body,
+                    html_body,
+                }
+            }
         }
     }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[derive(Debug)]
@@ -393,5 +450,20 @@ mod tests {
         assert!(rendered.subject.contains("Reset"));
         assert!(rendered.text_body.contains("reset-token"));
         assert!(rendered.html_body.contains("reset-token"));
+    }
+
+    #[test]
+    fn announcement_template_escapes_html_body() {
+        let rendered = render(EmailTemplate::EventAnnouncement {
+            to_email: "user@example.com".to_owned(),
+            display_name: "User".to_owned(),
+            event_title: "Gala".to_owned(),
+            subject: "Update".to_owned(),
+            body: "<script>alert(1)</script>".to_owned(),
+        });
+
+        assert!(rendered.subject.contains("Gala"));
+        assert!(rendered.text_body.contains("<script>alert(1)</script>"));
+        assert!(rendered.html_body.contains("&lt;script&gt;"));
     }
 }
