@@ -77,12 +77,10 @@ pub async fn register_for_event(
     user_id: Uuid,
 ) -> Result<(RegistrationInsertOutcome, Option<Registration>), sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let Some(event) = sqlx::query_as::<_, RegistrationEventLock>(
-        "SELECT id, capacity FROM events WHERE id = $1 FOR UPDATE",
-    )
-    .bind(event_id)
-    .fetch_optional(&mut *transaction)
-    .await?
+    let Some(event) = sqlx::query_as::<_, RegistrationEventLock>(EVENT_CAPACITY_LOCK_SQL)
+        .bind(event_id)
+        .fetch_optional(&mut *transaction)
+        .await?
     else {
         transaction.commit().await?;
         return Ok((RegistrationInsertOutcome::EventNotFound, None));
@@ -161,27 +159,10 @@ pub async fn list_active_attendees_for_event(
     pool: &PgPool,
     event_id: Uuid,
 ) -> Result<Vec<HostAttendeeRow>, sqlx::Error> {
-    sqlx::query_as::<_, HostAttendeeRow>(
-        r#"
-        SELECT
-            registrations.id AS registration_id,
-            users.id AS user_id,
-            users.email,
-            users.display_name,
-            registrations.status,
-            registrations.registered_at,
-            registrations.cancelled_at
-        FROM registrations
-        INNER JOIN users
-          ON users.id = registrations.user_id
-        WHERE registrations.event_id = $1
-          AND registrations.status = 'registered'
-        ORDER BY registrations.registered_at ASC, users.display_name ASC
-        "#,
-    )
-    .bind(event_id)
-    .fetch_all(pool)
-    .await
+    sqlx::query_as::<_, HostAttendeeRow>(LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL)
+        .bind(event_id)
+        .fetch_all(pool)
+        .await
 }
 
 async fn find_registration_for_user_in_tx(
@@ -189,25 +170,11 @@ async fn find_registration_for_user_in_tx(
     event_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<Registration>, sqlx::Error> {
-    sqlx::query_as::<_, Registration>(
-        r#"
-        SELECT
-            id,
-            event_id,
-            user_id,
-            status,
-            registered_at,
-            cancelled_at
-        FROM registrations
-        WHERE event_id = $1
-          AND user_id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(event_id)
-    .bind(user_id)
-    .fetch_optional(&mut **transaction)
-    .await
+    sqlx::query_as::<_, Registration>(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL)
+        .bind(event_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await
 }
 
 async fn active_registration_count_for_event_in_tx(
@@ -252,6 +219,15 @@ pub const UPSERT_REGISTERED_REGISTRATION_SQL: &str = r#"
         cancelled_at
 "#;
 
+pub const EVENT_CAPACITY_LOCK_SQL: &str = r#"
+    SELECT
+        id,
+        capacity
+    FROM events
+    WHERE id = $1
+    FOR UPDATE
+"#;
+
 pub const CANCEL_REGISTRATION_SQL: &str = r#"
     UPDATE registrations
     SET
@@ -266,6 +242,20 @@ pub const CANCEL_REGISTRATION_SQL: &str = r#"
         status,
         registered_at,
         cancelled_at
+"#;
+
+pub const SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL: &str = r#"
+    SELECT
+        id,
+        event_id,
+        user_id,
+        status,
+        registered_at,
+        cancelled_at
+    FROM registrations
+    WHERE event_id = $1
+      AND user_id = $2
+    FOR UPDATE
 "#;
 
 pub const SELECT_REGISTRATION_FOR_USER_SQL: &str = r#"
@@ -304,6 +294,23 @@ pub const LIST_ATTENDEES_FOR_EVENT_SQL: &str = r#"
     ORDER BY registrations.registered_at ASC, users.display_name ASC
 "#;
 
+pub const LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL: &str = r#"
+    SELECT
+        registrations.id AS registration_id,
+        users.id AS user_id,
+        users.email,
+        users.display_name,
+        registrations.status,
+        registrations.registered_at,
+        registrations.cancelled_at
+    FROM registrations
+    INNER JOIN users
+      ON users.id = registrations.user_id
+    WHERE registrations.event_id = $1
+      AND registrations.status = 'registered'
+    ORDER BY registrations.registered_at ASC, users.display_name ASC
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationStatusParseError {
     value: String,
@@ -322,8 +329,9 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        ACTIVE_REGISTRATION_COUNT_SQL, CANCEL_REGISTRATION_SQL, LIST_ATTENDEES_FOR_EVENT_SQL,
-        RegistrationStatus, UPSERT_REGISTERED_REGISTRATION_SQL,
+        ACTIVE_REGISTRATION_COUNT_SQL, CANCEL_REGISTRATION_SQL, EVENT_CAPACITY_LOCK_SQL,
+        LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL, LIST_ATTENDEES_FOR_EVENT_SQL, RegistrationStatus,
+        SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL, UPSERT_REGISTERED_REGISTRATION_SQL,
     };
 
     #[test]
@@ -346,8 +354,27 @@ mod tests {
     }
 
     #[test]
+    fn registration_capacity_checks_lock_event_and_existing_registration_rows() {
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("FOR UPDATE"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("WHERE id = $1"));
+        assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("FOR UPDATE"));
+        assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("event_id = $1"));
+        assert!(SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL.contains("user_id = $2"));
+    }
+
+    #[test]
+    fn register_upsert_supports_cancel_then_reregister_flow() {
+        assert!(UPSERT_REGISTERED_REGISTRATION_SQL.contains("ON CONFLICT (event_id, user_id)"));
+        assert!(UPSERT_REGISTERED_REGISTRATION_SQL.contains("ELSE NOW()"));
+        assert!(UPSERT_REGISTERED_REGISTRATION_SQL.contains("cancelled_at = NULL"));
+        assert!(CANCEL_REGISTRATION_SQL.contains("status = 'cancelled'"));
+        assert!(CANCEL_REGISTRATION_SQL.contains("cancelled_at = COALESCE(cancelled_at, NOW())"));
+    }
+
+    #[test]
     fn active_registration_count_only_counts_registered_rows() {
         assert!(ACTIVE_REGISTRATION_COUNT_SQL.contains("status = 'registered'"));
+        assert!(ACTIVE_REGISTRATION_COUNT_SQL.contains("event_id = $1"));
     }
 
     #[test]
@@ -355,5 +382,8 @@ mod tests {
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("INNER JOIN users"));
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("registrations.event_id = $1"));
         assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("users.email"));
+        assert!(
+            LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL.contains("registrations.status = 'registered'")
+        );
     }
 }
