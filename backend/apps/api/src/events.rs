@@ -62,6 +62,25 @@ pub struct EventChanges {
     pub cover_image_id: Option<Uuid>,
 }
 
+pub fn duplicate_event_template(existing: &Event, title: String, slug: String) -> NewEvent {
+    NewEvent {
+        host_id: existing.host_id,
+        title,
+        slug,
+        description_md: existing.description_md.clone(),
+        start_at: existing.start_at,
+        end_at: existing.end_at,
+        timezone: existing.timezone.clone(),
+        location_type: existing.location_type,
+        location_text: existing.location_text.clone(),
+        location_url: existing.location_url.clone(),
+        capacity: existing.capacity,
+        visibility: EventVisibility::Draft,
+        status: EventStatus::Draft,
+        cover_image_id: None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostEventListFilter {
     Draft,
@@ -272,68 +291,24 @@ pub async fn update_event_for_host(
     host_id: Uuid,
     changes: &EventChanges,
 ) -> Result<Option<Event>, sqlx::Error> {
-    sqlx::query_as::<_, Event>(
-        r#"
-        UPDATE events
-        SET
-            title = $3,
-            slug = $4,
-            description_md = $5,
-            start_at = $6,
-            end_at = $7,
-            timezone = $8,
-            location_type = $9,
-            location_text = $10,
-            location_url = $11,
-            capacity = $12,
-            visibility = $13,
-            status = $14,
-            cover_image_id = $15,
-            cancelled_at = CASE
-                WHEN $14 = 'cancelled' THEN COALESCE(cancelled_at, NOW())
-                ELSE NULL
-            END,
-            updated_at = NOW()
-        WHERE id = $1
-          AND host_id = $2
-        RETURNING
-            id,
-            host_id,
-            title,
-            slug,
-            description_md,
-            start_at,
-            end_at,
-            timezone,
-            location_type,
-            location_text,
-            location_url,
-            capacity,
-            visibility,
-            status,
-            cover_image_id,
-            created_at,
-            updated_at,
-            cancelled_at
-        "#,
-    )
-    .bind(event_id)
-    .bind(host_id)
-    .bind(&changes.title)
-    .bind(&changes.slug)
-    .bind(&changes.description_md)
-    .bind(changes.start_at)
-    .bind(changes.end_at)
-    .bind(&changes.timezone)
-    .bind(changes.location_type.as_str())
-    .bind(changes.location_text.as_deref())
-    .bind(changes.location_url.as_deref())
-    .bind(changes.capacity)
-    .bind(changes.visibility.as_str())
-    .bind(changes.status.as_str())
-    .bind(changes.cover_image_id)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as::<_, Event>(UPDATE_EVENT_FOR_HOST_SQL)
+        .bind(event_id)
+        .bind(host_id)
+        .bind(&changes.title)
+        .bind(&changes.slug)
+        .bind(&changes.description_md)
+        .bind(changes.start_at)
+        .bind(changes.end_at)
+        .bind(&changes.timezone)
+        .bind(changes.location_type.as_str())
+        .bind(changes.location_text.as_deref())
+        .bind(changes.location_url.as_deref())
+        .bind(changes.capacity)
+        .bind(changes.visibility.as_str())
+        .bind(changes.status.as_str())
+        .bind(changes.cover_image_id)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn cancel_event_for_host(
@@ -341,40 +316,11 @@ pub async fn cancel_event_for_host(
     event_id: Uuid,
     host_id: Uuid,
 ) -> Result<Option<Event>, sqlx::Error> {
-    sqlx::query_as::<_, Event>(
-        r#"
-        UPDATE events
-        SET
-            status = 'cancelled',
-            cancelled_at = COALESCE(cancelled_at, NOW()),
-            updated_at = NOW()
-        WHERE id = $1
-          AND host_id = $2
-        RETURNING
-            id,
-            host_id,
-            title,
-            slug,
-            description_md,
-            start_at,
-            end_at,
-            timezone,
-            location_type,
-            location_text,
-            location_url,
-            capacity,
-            visibility,
-            status,
-            cover_image_id,
-            created_at,
-            updated_at,
-            cancelled_at
-        "#,
-    )
-    .bind(event_id)
-    .bind(host_id)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as::<_, Event>(CANCEL_EVENT_FOR_HOST_SQL)
+        .bind(event_id)
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn insert_event_in_tx(
@@ -497,6 +443,79 @@ const EVENT_SELECT_BY_ID_AND_HOST: &str = r#"
     FROM events
     WHERE id = $1
       AND host_id = $2
+"#;
+
+const UPDATE_EVENT_FOR_HOST_SQL: &str = r#"
+    UPDATE events
+    SET
+        title = $3,
+        slug = $4,
+        description_md = $5,
+        start_at = $6,
+        end_at = $7,
+        timezone = $8,
+        location_type = $9,
+        location_text = $10,
+        location_url = $11,
+        capacity = $12,
+        visibility = $13,
+        status = $14,
+        cover_image_id = $15,
+        cancelled_at = CASE
+            WHEN $14 = 'cancelled' THEN COALESCE(cancelled_at, NOW())
+            ELSE NULL
+        END,
+        updated_at = NOW()
+    WHERE id = $1
+      AND host_id = $2
+    RETURNING
+        id,
+        host_id,
+        title,
+        slug,
+        description_md,
+        start_at,
+        end_at,
+        timezone,
+        location_type,
+        location_text,
+        location_url,
+        capacity,
+        visibility,
+        status,
+        cover_image_id,
+        created_at,
+        updated_at,
+        cancelled_at
+"#;
+
+const CANCEL_EVENT_FOR_HOST_SQL: &str = r#"
+    UPDATE events
+    SET
+        status = 'cancelled',
+        cancelled_at = COALESCE(cancelled_at, NOW()),
+        updated_at = NOW()
+    WHERE id = $1
+      AND host_id = $2
+    RETURNING
+        id,
+        host_id,
+        title,
+        slug,
+        description_md,
+        start_at,
+        end_at,
+        timezone,
+        location_type,
+        location_text,
+        location_url,
+        capacity,
+        visibility,
+        status,
+        cover_image_id,
+        created_at,
+        updated_at,
+        cancelled_at
 "#;
 
 fn host_event_list_filter_sql(filter: HostEventListFilter) -> &'static str {
@@ -656,7 +675,14 @@ impl std::error::Error for EventEnumParseError {}
 mod tests {
     use std::str::FromStr;
 
-    use super::{EventLocationType, EventStatus, EventVisibility};
+    use chrono::{Duration, Utc};
+    use uuid::Uuid;
+
+    use super::{
+        CANCEL_EVENT_FOR_HOST_SQL, EVENT_SELECT_BY_ID_AND_HOST, Event, EventLocationType,
+        EventStatus, EventVisibility, HostEventListFilter, UPDATE_EVENT_FOR_HOST_SQL,
+        duplicate_event_template, host_event_list_filter_sql,
+    };
 
     #[test]
     fn event_location_type_round_trip_strings() {
@@ -691,5 +717,97 @@ mod tests {
             EventStatus::from_str("published").expect("published should parse"),
             EventStatus::Published,
         );
+    }
+
+    #[test]
+    fn duplicate_event_template_resets_publish_state_and_cover() {
+        let existing = event_fixture(
+            Uuid::new_v4(),
+            "Original",
+            EventVisibility::Public,
+            EventStatus::Published,
+        );
+
+        let duplicate = duplicate_event_template(
+            &existing,
+            "Original Copy".to_owned(),
+            "original-copy".to_owned(),
+        );
+
+        assert_eq!(duplicate.host_id, existing.host_id);
+        assert_eq!(duplicate.title, "Original Copy");
+        assert_eq!(duplicate.slug, "original-copy");
+        assert_eq!(duplicate.description_md, existing.description_md);
+        assert_eq!(duplicate.start_at, existing.start_at);
+        assert_eq!(duplicate.end_at, existing.end_at);
+        assert_eq!(duplicate.timezone, existing.timezone);
+        assert_eq!(duplicate.location_type, existing.location_type);
+        assert_eq!(duplicate.location_text, existing.location_text);
+        assert_eq!(duplicate.location_url, existing.location_url);
+        assert_eq!(duplicate.capacity, existing.capacity);
+        assert_eq!(duplicate.visibility, EventVisibility::Draft);
+        assert_eq!(duplicate.status, EventStatus::Draft);
+        assert_eq!(duplicate.cover_image_id, None);
+    }
+
+    #[test]
+    fn host_event_queries_are_scoped_by_event_and_host() {
+        for query in
+            [EVENT_SELECT_BY_ID_AND_HOST, UPDATE_EVENT_FOR_HOST_SQL, CANCEL_EVENT_FOR_HOST_SQL]
+        {
+            assert!(query.contains("WHERE id = $1"));
+            assert!(query.contains("AND host_id = $2"));
+        }
+    }
+
+    #[test]
+    fn status_transition_queries_manage_cancelled_at() {
+        assert!(CANCEL_EVENT_FOR_HOST_SQL.contains("status = 'cancelled'"));
+        assert!(CANCEL_EVENT_FOR_HOST_SQL.contains("cancelled_at = COALESCE(cancelled_at, NOW())"));
+        assert!(UPDATE_EVENT_FOR_HOST_SQL.contains("WHEN $14 = 'cancelled'"));
+        assert!(UPDATE_EVENT_FOR_HOST_SQL.contains("ELSE NULL"));
+    }
+
+    #[test]
+    fn host_event_list_filters_match_status_rules() {
+        assert_eq!(host_event_list_filter_sql(HostEventListFilter::Draft), "status = 'draft'");
+        assert_eq!(
+            host_event_list_filter_sql(HostEventListFilter::Upcoming),
+            "status = 'published' AND end_at >= NOW()"
+        );
+        assert_eq!(
+            host_event_list_filter_sql(HostEventListFilter::Past),
+            "(status = 'completed' OR (status = 'published' AND end_at < NOW()))"
+        );
+    }
+
+    fn event_fixture(
+        host_id: Uuid,
+        title: &str,
+        visibility: EventVisibility,
+        status: EventStatus,
+    ) -> Event {
+        let now = Utc::now();
+
+        Event {
+            id: Uuid::new_v4(),
+            host_id,
+            title: title.to_owned(),
+            slug: "original".to_owned(),
+            description_md: "Event description".to_owned(),
+            start_at: now + Duration::days(2),
+            end_at: now + Duration::days(2) + Duration::hours(2),
+            timezone: "UTC".to_owned(),
+            location_type: EventLocationType::Hybrid,
+            location_text: Some("Main Hall".to_owned()),
+            location_url: Some("https://example.com/room".to_owned()),
+            capacity: Some(50),
+            visibility,
+            status,
+            cover_image_id: None,
+            created_at: now,
+            updated_at: now,
+            cancelled_at: None,
+        }
     }
 }
