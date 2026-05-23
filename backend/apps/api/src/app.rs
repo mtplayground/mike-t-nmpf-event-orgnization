@@ -1217,18 +1217,40 @@ async fn register_for_event(
         .await
         .map_err(AppError::from)?
     {
-        (registrations::RegistrationInsertOutcome::Registered, Some(registration)) => Ok(Json(
-            ApiResponse::new(build_registration_response(registration)),
-        )),
-        (registrations::RegistrationInsertOutcome::CapacityFull, None) => {
+        (
+            registrations::RegistrationInsertOutcome::Registered,
+            Some(registration),
+            Some(event),
+        ) => {
+            state
+                .email_service
+                .send_registration_confirmation_email(
+                    &current_user.email,
+                    &current_user.display_name,
+                    &event.title,
+                    event.start_at,
+                    event.end_at,
+                    &event.timezone,
+                    event.location_text.as_deref(),
+                    event.location_url.as_deref(),
+                )
+                .await
+                .map_err(map_email_send_error)?;
+
+            Ok(Json(ApiResponse::new(build_registration_response(registration))))
+        }
+        (
+            registrations::RegistrationInsertOutcome::AlreadyRegistered,
+            Some(registration),
+            Some(_),
+        ) => Ok(Json(ApiResponse::new(build_registration_response(registration)))),
+        (registrations::RegistrationInsertOutcome::CapacityFull, None, None) => {
             Err(AppError::conflict("event capacity has been reached"))
         }
-        (registrations::RegistrationInsertOutcome::EventNotFound, None) => {
+        (registrations::RegistrationInsertOutcome::EventNotFound, None, None) => {
             Err(AppError::not_found("event was not found"))
         }
-        (registrations::RegistrationInsertOutcome::Registered, None)
-        | (registrations::RegistrationInsertOutcome::CapacityFull, Some(_))
-        | (registrations::RegistrationInsertOutcome::EventNotFound, Some(_)) => {
+        _ => {
             Err(AppError::internal("registration operation returned an invalid state"))
         }
     }

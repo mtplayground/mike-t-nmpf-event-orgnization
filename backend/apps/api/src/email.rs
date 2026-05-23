@@ -6,7 +6,10 @@ use chrono::{DateTime, Utc};
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
     address::AddressError,
-    message::{Mailbox, Message, MultiPart, SinglePart, header::ContentType},
+    message::{
+        Attachment, Mailbox, Message, MultiPart, SinglePart,
+        header::{ContentType, ContentTypeErr},
+    },
     transport::smtp::{
         Error as SmtpTransportError,
         authentication::Credentials,
@@ -80,12 +83,20 @@ impl EmailService {
         display_name: &str,
         event_title: &str,
         starts_at: DateTime<Utc>,
+        ends_at: DateTime<Utc>,
+        timezone: &str,
+        location_text: Option<&str>,
+        location_url: Option<&str>,
     ) -> Result<(), EmailError> {
         self.enqueue(EmailTemplate::RegistrationConfirmation {
             to_email: to_email.to_owned(),
             display_name: display_name.to_owned(),
             event_title: event_title.to_owned(),
             starts_at,
+            ends_at,
+            timezone: timezone.to_owned(),
+            location_text: location_text.map(ToOwned::to_owned),
+            location_url: location_url.map(ToOwned::to_owned),
         })
         .await
     }
@@ -160,6 +171,10 @@ enum EmailTemplate {
         display_name: String,
         event_title: String,
         starts_at: DateTime<Utc>,
+        ends_at: DateTime<Utc>,
+        timezone: String,
+        location_text: Option<String>,
+        location_url: Option<String>,
     },
     EventReminder {
         to_email: String,
@@ -215,7 +230,10 @@ fn build_transport(config: &SmtpConfig) -> Result<AsyncSmtpTransport<Tokio1Execu
         .build())
 }
 
-fn render_message(sender_mailbox: &Mailbox, template: EmailTemplate) -> Result<Message, EmailError> {
+fn render_message(
+    sender_mailbox: &Mailbox,
+    template: EmailTemplate,
+) -> Result<Message, EmailError> {
     let rendered = template.render();
     let to_mailbox = Mailbox::new(
         Some(rendered.recipient_name.clone()),
@@ -225,20 +243,32 @@ fn render_message(sender_mailbox: &Mailbox, template: EmailTemplate) -> Result<M
             .map_err(EmailError::InvalidRecipientAddress)?,
     );
 
-    Message::builder()
+    let body = MultiPart::alternative()
+        .singlepart(SinglePart::plain(rendered.text_body))
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_HTML)
+                .body(rendered.html_body),
+        );
+    let builder = Message::builder()
         .from(sender_mailbox.clone())
         .to(to_mailbox)
-        .subject(rendered.subject)
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(SinglePart::plain(rendered.text_body))
-                .singlepart(
-                    SinglePart::builder()
-                        .header(ContentType::TEXT_HTML)
-                        .body(rendered.html_body),
-                ),
-        )
-        .map_err(EmailError::MessageBuild)
+        .subject(rendered.subject);
+
+    if rendered.attachments.is_empty() {
+        return builder.multipart(body).map_err(EmailError::MessageBuild);
+    }
+
+    let mut mixed_body = MultiPart::mixed().multipart(body);
+    for attachment in rendered.attachments {
+        let content_type =
+            ContentType::parse(&attachment.content_type).map_err(EmailError::InvalidContentType)?;
+        mixed_body = mixed_body.singlepart(
+            Attachment::new(attachment.filename).body(attachment.body, content_type),
+        );
+    }
+
+    builder.multipart(mixed_body).map_err(EmailError::MessageBuild)
 }
 
 fn log_delivery(response: Response) {
@@ -252,6 +282,14 @@ struct RenderedEmail {
     subject: String,
     text_body: String,
     html_body: String,
+    attachments: Vec<RenderedAttachment>,
+}
+
+#[derive(Debug)]
+struct RenderedAttachment {
+    filename: String,
+    content_type: String,
+    body: String,
 }
 
 impl EmailTemplate {
@@ -277,6 +315,7 @@ impl EmailTemplate {
                     subject,
                     text_body,
                     html_body,
+                    attachments: Vec::new(),
                 }
             }
             Self::PasswordReset {
@@ -299,6 +338,7 @@ impl EmailTemplate {
                     subject,
                     text_body,
                     html_body,
+                    attachments: Vec::new(),
                 }
             }
             Self::RegistrationConfirmation {
@@ -306,13 +346,59 @@ impl EmailTemplate {
                 display_name,
                 event_title,
                 starts_at,
+                ends_at,
+                timezone,
+                location_text,
+                location_url,
             } => {
                 let subject = format!("Registration confirmed for {event_title}");
+                let location =
+                    location_description(location_text.as_deref(), location_url.as_deref());
+                let location_line = location
+                    .as_deref()
+                    .map(|value| format!("Location: {value}\n"))
+                    .unwrap_or_default();
+                let location_html = location
+                    .as_deref()
+                    .map(|value| format!("<p>Location: {}</p>", escape_html(value)))
+                    .unwrap_or_default();
                 let text_body = format!(
-                    "Hi {display_name},\n\nYour registration for {event_title} is confirmed.\nThe event starts at {starts_at} UTC.\n"
+                    concat!(
+                        "Hi {},\n\n",
+                        "Your registration for {} is confirmed.\n",
+                        "Starts: {} UTC\n",
+                        "Ends: {} UTC\n",
+                        "Timezone: {}\n",
+                        "{}",
+                    ),
+                    display_name,
+                    event_title,
+                    starts_at,
+                    ends_at,
+                    timezone,
+                    location_line,
                 );
                 let html_body = format!(
-                    "<p>Hi {display_name},</p><p>Your registration for <strong>{event_title}</strong> is confirmed.</p><p>The event starts at {starts_at} UTC.</p>"
+                    concat!(
+                        "<p>Hi {},</p>",
+                        "<p>Your registration for <strong>{}</strong> is confirmed.</p>",
+                        "<p>Starts: {} UTC<br>",
+                        "Ends: {} UTC<br>",
+                        "Timezone: {}</p>",
+                        "{}",
+                    ),
+                    escape_html(&display_name),
+                    escape_html(&event_title),
+                    starts_at,
+                    ends_at,
+                    escape_html(&timezone),
+                    location_html,
+                );
+                let calendar_body = build_registration_calendar(
+                    &event_title,
+                    starts_at,
+                    ends_at,
+                    location.as_deref(),
                 );
 
                 RenderedEmail {
@@ -321,6 +407,11 @@ impl EmailTemplate {
                     subject,
                     text_body,
                     html_body,
+                    attachments: vec![RenderedAttachment {
+                        filename: calendar_filename(&event_title),
+                        content_type: "text/calendar; charset=utf-8; method=REQUEST".to_owned(),
+                        body: calendar_body,
+                    }],
                 }
             }
             Self::EventReminder {
@@ -352,6 +443,7 @@ impl EmailTemplate {
                     subject,
                     text_body,
                     html_body,
+                    attachments: Vec::new(),
                 }
             }
             Self::EventAnnouncement {
@@ -375,10 +467,104 @@ impl EmailTemplate {
                     subject,
                     text_body,
                     html_body,
+                    attachments: Vec::new(),
                 }
             }
         }
     }
+}
+
+fn location_description(location_text: Option<&str>, location_url: Option<&str>) -> Option<String> {
+    match (location_text, location_url) {
+        (Some(text), Some(url)) if !text.trim().is_empty() && !url.trim().is_empty() => {
+            Some(format!("{} ({})", text.trim(), url.trim()))
+        }
+        (Some(text), _) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+        (_, Some(url)) if !url.trim().is_empty() => Some(url.trim().to_owned()),
+        _ => None,
+    }
+}
+
+fn calendar_filename(event_title: &str) -> String {
+    let slug = event_title
+        .chars()
+        .filter_map(|character| {
+            if character.is_ascii_alphanumeric() {
+                Some(character.to_ascii_lowercase())
+            } else if character.is_whitespace() || matches!(character, '-' | '_') {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    if slug.is_empty() {
+        "event.ics".to_owned()
+    } else {
+        format!("{slug}.ics")
+    }
+}
+
+fn build_registration_calendar(
+    event_title: &str,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    location: Option<&str>,
+) -> String {
+    let location_line = location
+        .map(|value| format!("LOCATION:{}\r\n", escape_ics_text(value)))
+        .unwrap_or_default();
+
+    format!(
+        concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//Mike T NMPF//Event Organization//EN\r\n",
+            "CALSCALE:GREGORIAN\r\n",
+            "METHOD:REQUEST\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:{}-{}@mike-t-nmpf-event-organization\r\n",
+            "DTSTAMP:{}\r\n",
+            "DTSTART:{}\r\n",
+            "DTEND:{}\r\n",
+            "SUMMARY:{}\r\n",
+            "{}",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n"
+        ),
+        starts_at.timestamp(),
+        escape_ics_uid(event_title),
+        format_ics_datetime(Utc::now()),
+        format_ics_datetime(starts_at),
+        format_ics_datetime(ends_at),
+        escape_ics_text(event_title),
+        location_line,
+    )
+}
+
+fn format_ics_datetime(value: DateTime<Utc>) -> String {
+    value.format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+fn escape_ics_uid(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+}
+
+fn escape_ics_text(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
 }
 
 fn escape_html(value: &str) -> String {
@@ -394,6 +580,7 @@ fn escape_html(value: &str) -> String {
 pub enum EmailError {
     InvalidFromAddress(AddressError),
     InvalidRecipientAddress(AddressError),
+    InvalidContentType(ContentTypeErr),
     MessageBuild(lettre::error::Error),
     QueueFull,
     QueueClosed,
@@ -405,6 +592,9 @@ impl fmt::Display for EmailError {
         match self {
             Self::InvalidFromAddress(error) => write!(formatter, "invalid SMTP from address: {error}"),
             Self::InvalidRecipientAddress(error) => write!(formatter, "invalid recipient address: {error}"),
+            Self::InvalidContentType(error) => {
+                write!(formatter, "invalid attachment content type: {error}")
+            }
             Self::MessageBuild(error) => write!(formatter, "failed to build transactional email: {error}"),
             Self::QueueFull => formatter.write_str("transactional email queue is full"),
             Self::QueueClosed => formatter.write_str("transactional email queue is closed"),
@@ -417,8 +607,9 @@ impl std::error::Error for EmailError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{EmailTemplate, RenderedEmail};
+    use super::{EmailTemplate, RenderedEmail, render_message};
     use chrono::{TimeZone, Utc};
+    use lettre::message::Mailbox;
 
     fn render(template: EmailTemplate) -> RenderedEmail {
         template.render()
@@ -450,6 +641,60 @@ mod tests {
         assert!(rendered.subject.contains("Reset"));
         assert!(rendered.text_body.contains("reset-token"));
         assert!(rendered.html_body.contains("reset-token"));
+    }
+
+    #[test]
+    fn registration_confirmation_template_includes_calendar_attachment() {
+        let rendered = render(EmailTemplate::RegistrationConfirmation {
+            to_email: "user@example.com".to_owned(),
+            display_name: "User".to_owned(),
+            event_title: "Annual Gala".to_owned(),
+            starts_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
+            ends_at: Utc.with_ymd_and_hms(2026, 5, 18, 14, 0, 0).unwrap(),
+            timezone: "America/New_York".to_owned(),
+            location_text: Some("Main Hall".to_owned()),
+            location_url: Some("https://example.com/live".to_owned()),
+        });
+
+        assert!(rendered.subject.contains("Annual Gala"));
+        assert!(rendered.text_body.contains("America/New_York"));
+        assert_eq!(rendered.attachments.len(), 1);
+        assert_eq!(rendered.attachments[0].filename, "annual-gala.ics");
+        assert!(rendered.attachments[0].body.contains("BEGIN:VCALENDAR"));
+        assert!(rendered.attachments[0].body.contains("SUMMARY:Annual Gala"));
+        assert!(
+            rendered.attachments[0]
+                .body
+                .contains("LOCATION:Main Hall (https://example.com/live)")
+        );
+    }
+
+    #[test]
+    fn registration_confirmation_message_renders_ics_mime_part() {
+        let sender = Mailbox::new(
+            Some("Events".to_owned()),
+            "events@example.com".parse().expect("sender should parse"),
+        );
+        let message = render_message(
+            &sender,
+            EmailTemplate::RegistrationConfirmation {
+                to_email: "user@example.com".to_owned(),
+                display_name: "User".to_owned(),
+                event_title: "Annual Gala".to_owned(),
+                starts_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
+                ends_at: Utc.with_ymd_and_hms(2026, 5, 18, 14, 0, 0).unwrap(),
+                timezone: "America/New_York".to_owned(),
+                location_text: Some("Main Hall".to_owned()),
+                location_url: None,
+            },
+        )
+        .expect("registration confirmation should render");
+        let formatted =
+            String::from_utf8(message.formatted()).expect("message should be utf-8");
+
+        assert!(formatted.contains("Content-Type: text/calendar"));
+        assert!(formatted.contains("filename=\"annual-gala.ics\""));
+        assert!(formatted.contains("BEGIN:VCALENDAR"));
     }
 
     #[test]
