@@ -2508,13 +2508,16 @@ struct LoginAttemptEntry {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, TimeZone, Utc};
+    use uuid::Uuid;
 
     use super::{
         EventLocationType, EventStatus, EventVisibility, LoginRateLimiter, default_event_status,
-        public_event_capacity_remaining, slugify_event_title, validate_event_capacity,
-        validate_event_location, validate_event_times, validate_event_visibility_status,
+        build_attendees_csv, public_event_capacity_remaining, slugify_event_title,
+        validate_event_capacity, validate_event_location, validate_event_times,
+        validate_event_visibility_status,
     };
+    use crate::registrations::{HostAttendeeRow, RegistrationStatus};
 
     #[tokio::test]
     async fn login_rate_limiter_blocks_after_failure_limit() {
@@ -2620,6 +2623,41 @@ mod tests {
         assert_eq!(super::csv_escape("plain".to_owned()), "plain");
         assert_eq!(super::csv_escape("comma,value".to_owned()), "\"comma,value\"");
         assert_eq!(super::csv_escape("quote\"value".to_owned()), "\"quote\"\"value\"");
+    }
+
+    #[test]
+    fn attendee_csv_exports_header_and_registration_rows() {
+        let attendees = vec![
+            HostAttendeeRow {
+                registration_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+                    .unwrap(),
+                user_id: Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap(),
+                email: "attendee@example.com".to_owned(),
+                display_name: "Comma, Name".to_owned(),
+                status: RegistrationStatus::Registered,
+                registered_at: Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap(),
+                cancelled_at: None,
+            },
+            HostAttendeeRow {
+                registration_id: Uuid::parse_str("00000000-0000-0000-0000-000000000002")
+                    .unwrap(),
+                user_id: Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap(),
+                email: "cancelled@example.com".to_owned(),
+                display_name: "Cancelled User".to_owned(),
+                status: RegistrationStatus::Cancelled,
+                registered_at: Utc.with_ymd_and_hms(2026, 5, 23, 13, 0, 0).unwrap(),
+                cancelled_at: Some(Utc.with_ymd_and_hms(2026, 5, 23, 14, 0, 0).unwrap()),
+            },
+        ];
+
+        let csv = build_attendees_csv(&attendees);
+
+        assert!(csv.starts_with(
+            "registration_id,user_id,email,display_name,status,registered_at,cancelled_at\n"
+        ));
+        assert!(csv.contains("attendee@example.com,\"Comma, Name\",registered"));
+        assert!(csv.contains("cancelled@example.com,Cancelled User,cancelled"));
+        assert!(csv.contains("2026-05-23T14:00:00+00:00"));
     }
 
     #[test]
