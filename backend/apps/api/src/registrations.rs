@@ -17,6 +17,17 @@ pub struct Registration {
     pub cancelled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct HostAttendeeRow {
+    pub registration_id: Uuid,
+    pub user_id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub status: RegistrationStatus,
+    pub registered_at: DateTime<Utc>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationInsertOutcome {
     Registered,
@@ -136,6 +147,43 @@ pub async fn active_registration_count_for_event(
     sqlx::query_scalar::<_, i64>(ACTIVE_REGISTRATION_COUNT_SQL).bind(event_id).fetch_one(pool).await
 }
 
+pub async fn list_attendees_for_event(
+    pool: &PgPool,
+    event_id: Uuid,
+) -> Result<Vec<HostAttendeeRow>, sqlx::Error> {
+    sqlx::query_as::<_, HostAttendeeRow>(LIST_ATTENDEES_FOR_EVENT_SQL)
+        .bind(event_id)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn list_active_attendees_for_event(
+    pool: &PgPool,
+    event_id: Uuid,
+) -> Result<Vec<HostAttendeeRow>, sqlx::Error> {
+    sqlx::query_as::<_, HostAttendeeRow>(
+        r#"
+        SELECT
+            registrations.id AS registration_id,
+            users.id AS user_id,
+            users.email,
+            users.display_name,
+            registrations.status,
+            registrations.registered_at,
+            registrations.cancelled_at
+        FROM registrations
+        INNER JOIN users
+          ON users.id = registrations.user_id
+        WHERE registrations.event_id = $1
+          AND registrations.status = 'registered'
+        ORDER BY registrations.registered_at ASC, users.display_name ASC
+        "#,
+    )
+    .bind(event_id)
+    .fetch_all(pool)
+    .await
+}
+
 async fn find_registration_for_user_in_tx(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event_id: Uuid,
@@ -240,6 +288,22 @@ pub const ACTIVE_REGISTRATION_COUNT_SQL: &str = r#"
       AND status = 'registered'
 "#;
 
+pub const LIST_ATTENDEES_FOR_EVENT_SQL: &str = r#"
+    SELECT
+        registrations.id AS registration_id,
+        users.id AS user_id,
+        users.email,
+        users.display_name,
+        registrations.status,
+        registrations.registered_at,
+        registrations.cancelled_at
+    FROM registrations
+    INNER JOIN users
+      ON users.id = registrations.user_id
+    WHERE registrations.event_id = $1
+    ORDER BY registrations.registered_at ASC, users.display_name ASC
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationStatusParseError {
     value: String,
@@ -258,8 +322,8 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        ACTIVE_REGISTRATION_COUNT_SQL, CANCEL_REGISTRATION_SQL, RegistrationStatus,
-        UPSERT_REGISTERED_REGISTRATION_SQL,
+        ACTIVE_REGISTRATION_COUNT_SQL, CANCEL_REGISTRATION_SQL, LIST_ATTENDEES_FOR_EVENT_SQL,
+        RegistrationStatus, UPSERT_REGISTERED_REGISTRATION_SQL,
     };
 
     #[test]
@@ -284,5 +348,12 @@ mod tests {
     #[test]
     fn active_registration_count_only_counts_registered_rows() {
         assert!(ACTIVE_REGISTRATION_COUNT_SQL.contains("status = 'registered'"));
+    }
+
+    #[test]
+    fn attendee_list_query_joins_registration_users() {
+        assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("INNER JOIN users"));
+        assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("registrations.event_id = $1"));
+        assert!(LIST_ATTENDEES_FOR_EVENT_SQL.contains("users.email"));
     }
 }

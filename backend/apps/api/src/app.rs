@@ -4,6 +4,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     middleware,
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -32,8 +33,8 @@ use crate::{
     extract::{CurrentUser, ValidatedJson},
     object_storage::{ObjectMetadata, ObjectStorageError},
     password_reset::{PasswordResetError, PasswordResetService},
-    registrations,
     refresh_tokens::{RefreshTokenError, RefreshTokenService},
+    registrations,
     users::{self, NewUser},
 };
 
@@ -431,6 +432,45 @@ struct HostEventListItemResponse {
     cancelled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Serialize)]
+struct HostEventAttendeesResponse {
+    event_id: Uuid,
+    attendees: Vec<HostEventAttendeeResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostEventAttendeeResponse {
+    registration_id: Uuid,
+    user_id: Uuid,
+    email: String,
+    display_name: String,
+    status: registrations::RegistrationStatus,
+    registered_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+struct AnnouncementRequest {
+    #[validate(length(
+        min = 1,
+        max = 120,
+        message = "subject must be between 1 and 120 characters"
+    ))]
+    subject: String,
+    #[validate(length(
+        min = 1,
+        max = 4000,
+        message = "body must be between 1 and 4000 characters"
+    ))]
+    body: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnnouncementResponse {
+    accepted: bool,
+    recipient_count: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct PublicEventsQuery {
     query: Option<String>,
@@ -519,6 +559,9 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
         .route("/events", post(create_event))
         .route("/events/{id}", patch(update_event).delete(cancel_event))
+        .route("/events/{id}/attendees", get(list_event_attendees))
+        .route("/events/{id}/attendees.csv", get(download_event_attendees_csv))
+        .route("/events/{id}/announce", post(send_event_announcement))
         .route("/events/{id}/duplicate", post(duplicate_event))
         .route("/events/{id}/cover/upload-url", post(create_event_cover_upload_url))
         .route("/events/{id}/cover/confirm", post(confirm_event_cover_upload))
@@ -599,10 +642,7 @@ async fn list_public_events(
 
     let next_cursor =
         if has_next_page { rows.last().map(public_event_cursor_for_row) } else { None };
-    let items = rows
-        .into_iter()
-        .map(|row| build_public_event_response(row, &state))
-        .collect();
+    let items = rows.into_iter().map(|row| build_public_event_response(row, &state)).collect();
 
     Ok(Json(ApiResponse::new(PublicEventListResponse { items, next_cursor })))
 }
@@ -1082,6 +1122,78 @@ async fn list_my_events(
     })))
 }
 
+async fn list_event_attendees(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Json<ApiResponse<HostEventAttendeesResponse>>, AppError> {
+    require_host_event(&state, event_id, current_user.id).await?;
+    let attendees = registrations::list_attendees_for_event(&state.db_pool, event_id)
+        .await
+        .map_err(AppError::from)?
+        .into_iter()
+        .map(build_host_event_attendee_response)
+        .collect();
+
+    Ok(Json(ApiResponse::new(HostEventAttendeesResponse { event_id, attendees })))
+}
+
+async fn download_event_attendees_csv(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+) -> Result<Response, AppError> {
+    let event = require_host_event(&state, event_id, current_user.id).await?;
+    let attendees = registrations::list_attendees_for_event(&state.db_pool, event_id)
+        .await
+        .map_err(AppError::from)?;
+    let csv = build_attendees_csv(&attendees);
+    let filename = format!("{}-attendees.csv", event.slug);
+    let headers = [
+        (header::CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8")),
+        (
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+                .map_err(|_| AppError::internal("failed to build CSV download headers"))?,
+        ),
+    ];
+
+    Ok((headers, csv).into_response())
+}
+
+async fn send_event_announcement(
+    State(state): State<SharedAppState>,
+    Path(event_id): Path<Uuid>,
+    current_user: CurrentUser,
+    payload: ValidatedJson<AnnouncementRequest>,
+) -> Result<Json<ApiResponse<AnnouncementResponse>>, AppError> {
+    let event = require_host_event(&state, event_id, current_user.id).await?;
+    let subject = normalize_required_text(&payload.subject, "subject")?;
+    let body = normalize_required_text(&payload.body, "body")?;
+    let attendees = registrations::list_active_attendees_for_event(&state.db_pool, event_id)
+        .await
+        .map_err(AppError::from)?;
+
+    for attendee in &attendees {
+        state
+            .email_service
+            .send_event_announcement_email(
+                &attendee.email,
+                &attendee.display_name,
+                &event.title,
+                &subject,
+                &body,
+            )
+            .await
+            .map_err(map_email_send_error)?;
+    }
+
+    Ok(Json(ApiResponse::new(AnnouncementResponse {
+        accepted: true,
+        recipient_count: attendees.len(),
+    })))
+}
+
 async fn update_event(
     State(state): State<SharedAppState>,
     Path(event_id): Path<Uuid>,
@@ -1504,6 +1616,55 @@ fn build_host_event_list_item_response(row: events::HostEventListRow) -> HostEve
         created_at: row.created_at,
         updated_at: row.updated_at,
         cancelled_at: row.cancelled_at,
+    }
+}
+
+fn build_host_event_attendee_response(
+    row: registrations::HostAttendeeRow,
+) -> HostEventAttendeeResponse {
+    HostEventAttendeeResponse {
+        registration_id: row.registration_id,
+        user_id: row.user_id,
+        email: row.email,
+        display_name: row.display_name,
+        status: row.status,
+        registered_at: row.registered_at,
+        cancelled_at: row.cancelled_at,
+    }
+}
+
+fn build_attendees_csv(attendees: &[registrations::HostAttendeeRow]) -> String {
+    let mut csv = String::from(
+        "registration_id,user_id,email,display_name,status,registered_at,cancelled_at\n",
+    );
+
+    for attendee in attendees {
+        let row = [
+            attendee.registration_id.to_string(),
+            attendee.user_id.to_string(),
+            attendee.email.clone(),
+            attendee.display_name.clone(),
+            attendee.status.as_str().to_owned(),
+            attendee.registered_at.to_rfc3339(),
+            attendee.cancelled_at.map(|value| value.to_rfc3339()).unwrap_or_default(),
+        ]
+        .into_iter()
+        .map(csv_escape)
+        .collect::<Vec<_>>()
+        .join(",");
+
+        csv.push_str(&row);
+        csv.push('\n');
+    }
+
+    csv
+}
+
+fn csv_escape(value: String) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value
     }
 }
 
@@ -2366,6 +2527,13 @@ mod tests {
     fn event_slug_generation_normalizes_titles() {
         assert_eq!(slugify_event_title("  Mike T: Spring Gala!  "), "mike-t-spring-gala");
         assert_eq!(slugify_event_title("!!!"), "event");
+    }
+
+    #[test]
+    fn csv_escape_quotes_delimited_values() {
+        assert_eq!(super::csv_escape("plain".to_owned()), "plain");
+        assert_eq!(super::csv_escape("comma,value".to_owned()), "\"comma,value\"");
+        assert_eq!(super::csv_escape("quote\"value".to_owned()), "\"quote\"\"value\"");
     }
 
     #[test]
