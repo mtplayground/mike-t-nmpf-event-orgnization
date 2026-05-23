@@ -136,6 +136,35 @@ pub struct PublicEventListRow {
     pub thumbnail_bytes: Option<i64>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct PublicEventDetailRow {
+    pub id: Uuid,
+    pub host_id: Uuid,
+    pub title: String,
+    pub slug: String,
+    pub description_md: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+    pub location_type: EventLocationType,
+    pub location_text: Option<String>,
+    pub location_url: Option<String>,
+    pub capacity: Option<i32>,
+    pub visibility: EventVisibility,
+    pub status: EventStatus,
+    pub cover_image_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub host_display_name: String,
+    pub host_avatar_object_key: Option<String>,
+    pub attendee_count: i64,
+    pub thumbnail_object_key: Option<String>,
+    pub thumbnail_width: Option<i32>,
+    pub thumbnail_height: Option<i32>,
+    pub thumbnail_bytes: Option<i64>,
+}
+
 pub async fn insert_event(pool: &PgPool, event: &NewEvent) -> Result<Event, sqlx::Error> {
     sqlx::query_as::<_, Event>(
         r#"
@@ -232,6 +261,16 @@ pub async fn list_public_events(
         .bind(cursor_id)
         .bind(limit)
         .fetch_all(pool)
+        .await
+}
+
+pub async fn find_public_event_by_slug(
+    pool: &PgPool,
+    slug: &str,
+) -> Result<Option<PublicEventDetailRow>, sqlx::Error> {
+    sqlx::query_as::<_, PublicEventDetailRow>(PUBLIC_EVENT_DETAIL_SQL)
+        .bind(slug)
+        .fetch_optional(pool)
         .await
 }
 
@@ -535,6 +574,45 @@ const PUBLIC_EVENT_LIST_SQL: &str = r#"
     LIMIT $6
 "#;
 
+const PUBLIC_EVENT_DETAIL_SQL: &str = r#"
+    SELECT
+        events.id,
+        events.host_id,
+        events.title,
+        events.slug,
+        events.description_md,
+        events.start_at,
+        events.end_at,
+        events.timezone,
+        events.location_type,
+        events.location_text,
+        events.location_url,
+        events.capacity,
+        events.visibility,
+        events.status,
+        events.cover_image_id,
+        events.created_at,
+        events.updated_at,
+        events.cancelled_at,
+        users.display_name AS host_display_name,
+        users.avatar_object_key AS host_avatar_object_key,
+        0::BIGINT AS attendee_count,
+        thumbnail.object_key AS thumbnail_object_key,
+        thumbnail.width AS thumbnail_width,
+        thumbnail.height AS thumbnail_height,
+        thumbnail.bytes AS thumbnail_bytes
+    FROM events
+    INNER JOIN users
+      ON users.id = events.host_id
+    LEFT JOIN event_images AS thumbnail
+      ON thumbnail.event_id = events.id
+     AND thumbnail.variant = 'thumbnail'
+    WHERE events.slug = $1
+      AND events.visibility = 'public'
+      AND events.status = 'published'
+      AND events.cancelled_at IS NULL
+"#;
+
 const UPDATE_EVENT_FOR_HOST_SQL: &str = r#"
     UPDATE events
     SET
@@ -770,8 +848,9 @@ mod tests {
 
     use super::{
         CANCEL_EVENT_FOR_HOST_SQL, EVENT_SELECT_BY_ID_AND_HOST, Event, EventLocationType,
-        EventStatus, EventVisibility, HostEventListFilter, PUBLIC_EVENT_LIST_SQL,
-        UPDATE_EVENT_FOR_HOST_SQL, duplicate_event_template, host_event_list_filter_sql,
+        EventStatus, EventVisibility, HostEventListFilter, PUBLIC_EVENT_DETAIL_SQL,
+        PUBLIC_EVENT_LIST_SQL, UPDATE_EVENT_FOR_HOST_SQL, duplicate_event_template,
+        host_event_list_filter_sql,
     };
 
     #[test]
@@ -879,6 +958,17 @@ mod tests {
         assert!(PUBLIC_EVENT_LIST_SQL.contains("events.end_at >= NOW()"));
         assert!(PUBLIC_EVENT_LIST_SQL.contains("thumbnail.variant = 'thumbnail'"));
         assert!(PUBLIC_EVENT_LIST_SQL.contains("ORDER BY events.start_at ASC, events.id ASC"));
+    }
+
+    #[test]
+    fn public_event_detail_query_filters_by_slug_and_includes_host_context() {
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.slug = $1"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.visibility = 'public'"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.status = 'published'"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("events.cancelled_at IS NULL"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("INNER JOIN users"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("0::BIGINT AS attendee_count"));
+        assert!(PUBLIC_EVENT_DETAIL_SQL.contains("thumbnail.variant = 'thumbnail'"));
     }
 
     fn event_fixture(
