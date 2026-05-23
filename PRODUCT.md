@@ -19,7 +19,9 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - Host attendee operations: hosts can list event attendees, download attendee CSV, and queue rate-limited announcement emails to currently registered attendees for their own events.
 - Attendee area: authenticated attendees can browse public events, register/cancel from event detail, and view upcoming/past registrations with pagination.
 - Frontend: React Router app shell with public auth pages, protected profile/host/attendee areas, host event dashboard, event create/edit form with cover upload, attendee discovery feed, public event detail page, attendee registration dashboard, and host attendee management page with CSV export and announcement composer.
+- Frontend resilience: the app has a global React error boundary, route-level error UI, and shared status/loading/empty-state panels used by key host and attendee views.
 - Testing: frontend includes a Playwright E2E suite covering registration, verification, event creation with cover, publishing, attendee registration/cancellation, host CSV export, and announcements.
+- Deployment packaging: the repo includes scripts for building the backend release binary and frontend static bundle, a sample nginx config for serving the frontend and proxying `/api`, and a production environment checklist.
 
 ## Architecture
 
@@ -32,13 +34,16 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - Registration capacity enforcement locks the target event row before counting active registrations.
 - HTTP requests receive or reuse an `x-request-id`; structured tracing records request id, method, path, status, latency, and authenticated user id when available.
 - Backend error handling maps validation, JSON, auth, conflict, not-found, rate-limit, SQL row-not-found, and SQL unique-violation failures into consistent API error envelopes.
+- Deployment remains script/runbook based; there is no Dockerfile or CI deployment workflow in the repository.
 
 ## Conventions
 
 - Default branch is `main`.
 - Backend code lives under `backend/apps/api`; frontend code lives under `frontend/src`.
+- Deployment docs and samples live under `deploy`; packaging scripts live under `scripts`.
 - Rust validation uses request DTOs plus `validator`; business validation returns structured API errors.
 - Event enum wire values are snake_case: `in_person`, `virtual`, `hybrid`, `draft`, `public`, `unlisted`, `private`, `published`, `cancelled`, `completed`.
 - Registration status wire values are snake_case: `registered`, `cancelled`.
 - Recommended verification commands are `cargo build`, `cargo test --workspace`, and `cargo clippy --workspace -- -D warnings` from `backend`.
 - Frontend verification commands include `npm run build`, `npm run lint`, `npm run format:check`, and `npm run test:e2e` from `frontend`.
+- Packaging commands are `./scripts/build-backend-release.sh` and `VITE_API_BASE_URL=<public-api-url> ./scripts/build-frontend-bundle.sh` from the repo root.
