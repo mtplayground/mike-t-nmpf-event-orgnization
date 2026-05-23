@@ -5,6 +5,7 @@ import { RootLayout } from '@/components/root-layout';
 import { AttendeePage } from '@/pages/attendee-page';
 import { AuthPage } from '@/pages/auth-page';
 import { ForgotPasswordPage } from '@/pages/forgot-password-page';
+import { HostEventAttendeesPage } from '@/pages/host-event-attendees-page';
 import { HostEventFormPage } from '@/pages/host-event-form-page';
 import { HomePage } from '@/pages/home-page';
 import { HostPage } from '@/pages/host-page';
@@ -56,6 +57,14 @@ export const router = createBrowserRouter([
         element: (
           <ProtectedRoute>
             <HostEventFormPage mode="edit" />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: 'host/events/:eventId/attendees',
+        element: (
+          <ProtectedRoute>
+            <HostEventAttendeesPage />
           </ProtectedRoute>
         ),
       },
