@@ -9,8 +9,9 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - User accounts: registration, login, refresh/logout, email verification, forgot/reset password, and `/auth/me`.
 - Profiles: authenticated users can read and update display name, bio, and avatar object key.
 - Avatars: backend can issue presigned upload URLs and confirm uploaded avatar objects against S3-compatible object storage metadata.
-- Events: hosts can create, read, update, cancel, and duplicate their own events through authenticated host-scoped endpoints.
+- Events: hosts can create, read, update, cancel, duplicate, and list their own events through authenticated host-scoped endpoints.
 - Event fields: title, generated unique slug, markdown description, start/end time, timezone, location type/details, capacity, visibility, status, and optional cover image reference.
+- Host event lists: `GET /me/events?status=draft|upcoming|past` returns paginated event rows with attendee counts and pagination metadata.
 - Event cover images: backend issues presigned upload URLs for owned events, validates uploaded image content, generates hero and thumbnail PNG variants, stores image metadata, and cleans up replaced variants.
 - Frontend: React Router app shell with public auth pages plus protected profile, host, and attendee pages; API client supports JSON requests and upload progress.
 
@@ -20,7 +21,7 @@ Mike T NMPF Event Organization is an event organization platform with a Rust API
 - Database migrations are embedded and also runnable from `backend/apps/api/migrations`.
 - API responses use `{ "data": ... }`; errors use `{ "error": { "code", "message", "fields?" } }`.
 - Authenticated routes use bearer access tokens and a current-user extractor.
-- Host event ownership is enforced by filtering event reads/writes by both event id and authenticated host id.
+- Host event ownership is enforced by filtering event reads/writes and list queries by authenticated host id.
 - Object uploads use presigned URLs; the API confirms uploaded objects before persisting references or derived assets.
 
 ## Conventions
