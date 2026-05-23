@@ -31,8 +31,19 @@ pub struct HostAttendeeRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationInsertOutcome {
     Registered,
+    AlreadyRegistered,
     EventNotFound,
     CapacityFull,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistrationEventDetails {
+    pub title: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+    pub location_text: Option<String>,
+    pub location_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -75,7 +86,14 @@ pub async fn register_for_event(
     pool: &PgPool,
     event_id: Uuid,
     user_id: Uuid,
-) -> Result<(RegistrationInsertOutcome, Option<Registration>), sqlx::Error> {
+) -> Result<
+    (
+        RegistrationInsertOutcome,
+        Option<Registration>,
+        Option<RegistrationEventDetails>,
+    ),
+    sqlx::Error,
+> {
     let mut transaction = pool.begin().await?;
     let Some(event) = sqlx::query_as::<_, RegistrationEventLock>(EVENT_CAPACITY_LOCK_SQL)
         .bind(event_id)
@@ -83,15 +101,20 @@ pub async fn register_for_event(
         .await?
     else {
         transaction.commit().await?;
-        return Ok((RegistrationInsertOutcome::EventNotFound, None));
+        return Ok((RegistrationInsertOutcome::EventNotFound, None, None));
     };
+    let event_details = event.details();
 
     if let Some(existing) =
         find_registration_for_user_in_tx(&mut transaction, event_id, user_id).await?
     {
         if existing.status == RegistrationStatus::Registered {
             transaction.commit().await?;
-            return Ok((RegistrationInsertOutcome::Registered, Some(existing)));
+            return Ok((
+                RegistrationInsertOutcome::AlreadyRegistered,
+                Some(existing),
+                Some(event_details),
+            ));
         }
     }
 
@@ -100,7 +123,7 @@ pub async fn register_for_event(
 
     if matches!(event.capacity, Some(capacity) if active_count >= i64::from(capacity)) {
         transaction.commit().await?;
-        return Ok((RegistrationInsertOutcome::CapacityFull, None));
+        return Ok((RegistrationInsertOutcome::CapacityFull, None, None));
     }
 
     let registration = sqlx::query_as::<_, Registration>(UPSERT_REGISTERED_REGISTRATION_SQL)
@@ -111,7 +134,11 @@ pub async fn register_for_event(
 
     transaction.commit().await?;
 
-    Ok((RegistrationInsertOutcome::Registered, Some(registration)))
+    Ok((
+        RegistrationInsertOutcome::Registered,
+        Some(registration),
+        Some(event_details),
+    ))
 }
 
 pub async fn cancel_registration(
@@ -190,7 +217,26 @@ async fn active_registration_count_for_event_in_tx(
 #[derive(Debug, Clone, FromRow)]
 struct RegistrationEventLock {
     id: Uuid,
+    title: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_text: Option<String>,
+    location_url: Option<String>,
     capacity: Option<i32>,
+}
+
+impl RegistrationEventLock {
+    fn details(&self) -> RegistrationEventDetails {
+        RegistrationEventDetails {
+            title: self.title.clone(),
+            start_at: self.start_at,
+            end_at: self.end_at,
+            timezone: self.timezone.clone(),
+            location_text: self.location_text.clone(),
+            location_url: self.location_url.clone(),
+        }
+    }
 }
 
 pub const UPSERT_REGISTERED_REGISTRATION_SQL: &str = r#"
@@ -222,6 +268,12 @@ pub const UPSERT_REGISTERED_REGISTRATION_SQL: &str = r#"
 pub const EVENT_CAPACITY_LOCK_SQL: &str = r#"
     SELECT
         id,
+        title,
+        start_at,
+        end_at,
+        timezone,
+        location_text,
+        location_url,
         capacity
     FROM events
     WHERE id = $1
@@ -361,6 +413,12 @@ mod tests {
     fn registration_capacity_checks_lock_event_and_existing_registration_rows() {
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("FOR UPDATE"));
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("WHERE id = $1"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("title"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("start_at"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("end_at"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("timezone"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("location_text"));
+        assert!(EVENT_CAPACITY_LOCK_SQL.contains("location_url"));
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("visibility = 'public'"));
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("status = 'published'"));
         assert!(EVENT_CAPACITY_LOCK_SQL.contains("cancelled_at IS NULL"));
