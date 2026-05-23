@@ -67,6 +67,15 @@ type PublicEventDetailResponse = {
   current_user_registration_state: RegistrationState;
 };
 
+type RegistrationResponse = {
+  id: string;
+  event_id: string;
+  user_id: string;
+  status: Exclude<RegistrationState, 'waitlisted' | null>;
+  registered_at: string;
+  cancelled_at: string | null;
+};
+
 type LocalRegistrationState = RegistrationState | 'pending';
 
 export function EventDetailPage() {
@@ -77,6 +86,7 @@ export function EventDetailPage() {
   const [registrationState, setRegistrationState] =
     useState<LocalRegistrationState>(null);
   const [loading, setLoading] = useState(true);
+  const [registrationBusy, setRegistrationBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -166,14 +176,89 @@ export function EventDetailPage() {
     }
   }
 
-  function register() {
+  async function register() {
+    if (!detail) {
+      return;
+    }
+
+    setError(null);
+    setMessage(null);
+
+    const previousDetail = detail;
+    const previousRegistrationState = registrationState;
+    const optimisticDetail = applyRegistrationDelta(detail, 1);
+
+    setRegistrationBusy(true);
     setRegistrationState('pending');
-    setMessage('Registration selected.');
+    setDetail(optimisticDetail);
+
+    try {
+      const refreshed = await refreshSession({ force: true });
+      const currentSession = useAuthStore.getState().session;
+
+      if (!refreshed || !currentSession) {
+        throw new Error('You must be signed in to register.');
+      }
+
+      const registration = await requestJson<RegistrationResponse>(
+        `/events/${detail.event.id}/register`,
+        {
+          method: 'POST',
+          token: currentSession.accessToken,
+        },
+      );
+
+      setRegistrationState(registration.status);
+      setMessage('Registration confirmed.');
+    } catch (registerError) {
+      setDetail(previousDetail);
+      setRegistrationState(previousRegistrationState);
+      setError(readError(registerError, 'Unable to register for this event.'));
+    } finally {
+      setRegistrationBusy(false);
+    }
   }
 
-  function cancelRegistration() {
+  async function cancelRegistration() {
+    if (!detail) {
+      return;
+    }
+
+    setError(null);
+    setMessage(null);
+
+    const previousDetail = detail;
+    const previousRegistrationState = registrationState;
+    const optimisticDetail = applyRegistrationDelta(detail, -1);
+
+    setRegistrationBusy(true);
     setRegistrationState(null);
-    setMessage('Registration removed.');
+    setDetail(optimisticDetail);
+
+    try {
+      const refreshed = await refreshSession({ force: true });
+      const currentSession = useAuthStore.getState().session;
+
+      if (!refreshed || !currentSession) {
+        throw new Error('You must be signed in to cancel registration.');
+      }
+
+      await requestJson<RegistrationResponse>(
+        `/events/${detail.event.id}/register`,
+        {
+          method: 'DELETE',
+          token: currentSession.accessToken,
+        },
+      );
+
+      setMessage('Registration cancelled.');
+    } catch (cancelError) {
+      setDetail(previousDetail);
+      setRegistrationState(previousRegistrationState);
+      setError(readError(cancelError, 'Unable to cancel this registration.'));
+    } finally {
+      setRegistrationBusy(false);
+    }
   }
 
   if (loading) {
@@ -245,6 +330,7 @@ export function EventDetailPage() {
         <aside className="space-y-6">
           <RegistrationPanel
             detail={detail}
+            busy={registrationBusy}
             registrationState={registrationState}
             signedIn={Boolean(session)}
             onCancel={cancelRegistration}
@@ -323,12 +409,14 @@ function EventHero({
 }
 
 function RegistrationPanel({
+  busy,
   detail,
   registrationState,
   signedIn,
   onCancel,
   onRegister,
 }: {
+  busy: boolean;
   detail: PublicEventDetailResponse;
   registrationState: LocalRegistrationState;
   signedIn: boolean;
@@ -384,20 +472,21 @@ function RegistrationPanel({
           isRegistered ? (
             <Button
               className="w-full"
+              disabled={busy}
               onClick={onCancel}
               type="button"
               variant="outline"
             >
-              Cancel registration
+              {busy ? 'Cancelling...' : 'Cancel registration'}
             </Button>
           ) : (
             <Button
               className="w-full"
-              disabled={isFull}
+              disabled={isFull || busy}
               onClick={onRegister}
               type="button"
             >
-              {isFull ? 'Event is full' : 'Register'}
+              {busy ? 'Registering...' : isFull ? 'Event is full' : 'Register'}
             </Button>
           )
         ) : (
@@ -405,6 +494,12 @@ function RegistrationPanel({
             <Link to="/auth/login">Sign in to register</Link>
           </Button>
         )}
+        {isFull ? (
+          <p className="text-xs leading-5 text-muted-foreground">
+            Capacity has been reached. Try again later if another attendee
+            cancels.
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -521,6 +616,23 @@ function remainingCapacityLabel(detail: PublicEventDetailResponse) {
   }
 
   return `${detail.capacity_remaining} spot${detail.capacity_remaining === 1 ? '' : 's'} remaining`;
+}
+
+function applyRegistrationDelta(
+  detail: PublicEventDetailResponse,
+  delta: 1 | -1,
+): PublicEventDetailResponse {
+  const attendeeCount = Math.max(0, detail.attendee_count + delta);
+  const capacityRemaining =
+    detail.capacity_remaining === null
+      ? null
+      : Math.max(0, detail.capacity_remaining - delta);
+
+  return {
+    ...detail,
+    attendee_count: attendeeCount,
+    capacity_remaining: capacityRemaining,
+  };
 }
 
 function registrationLabel(registrationState: LocalRegistrationState) {
