@@ -203,7 +203,7 @@ impl ObjectStorageClient {
         }
     }
 
-    fn public_url_for(&self, key: &str) -> Option<String> {
+    pub fn public_url_for(&self, key: &str) -> Option<String> {
         self.public_base_url
             .as_ref()
             .map(|base| format!("{}/{}", base.trim_end_matches('/'), key))

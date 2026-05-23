@@ -463,6 +463,7 @@ struct PublicEventResponse {
 #[derive(Debug, Serialize)]
 struct PublicEventThumbnailResponse {
     object_key: String,
+    public_url: Option<String>,
     width: i32,
     height: i32,
     bytes: i64,
@@ -597,7 +598,10 @@ async fn list_public_events(
 
     let next_cursor =
         if has_next_page { rows.last().map(public_event_cursor_for_row) } else { None };
-    let items = rows.into_iter().map(build_public_event_response).collect();
+    let items = rows
+        .into_iter()
+        .map(|row| build_public_event_response(row, &state))
+        .collect();
 
     Ok(Json(ApiResponse::new(PublicEventListResponse { items, next_cursor })))
 }
@@ -614,7 +618,11 @@ async fn read_public_event(
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found("event was not found"))?;
 
-    Ok(Json(ApiResponse::new(build_public_event_detail_response(row, current_user_id))))
+    Ok(Json(ApiResponse::new(build_public_event_detail_response(
+        row,
+        &state,
+        current_user_id,
+    ))))
 }
 
 async fn register(
@@ -1491,8 +1499,12 @@ fn build_host_event_list_item_response(row: events::HostEventListRow) -> HostEve
     }
 }
 
-fn build_public_event_response(row: events::PublicEventListRow) -> PublicEventResponse {
+fn build_public_event_response(
+    row: events::PublicEventListRow,
+    state: &SharedAppState,
+) -> PublicEventResponse {
     let thumbnail = row.thumbnail_object_key.map(|object_key| PublicEventThumbnailResponse {
+        public_url: state.object_storage.public_url_for(&object_key),
         object_key,
         width: row.thumbnail_width.unwrap_or_default(),
         height: row.thumbnail_height.unwrap_or_default(),
@@ -1517,11 +1529,13 @@ fn build_public_event_response(row: events::PublicEventListRow) -> PublicEventRe
 
 fn build_public_event_detail_response(
     row: events::PublicEventDetailRow,
+    state: &SharedAppState,
     _current_user_id: Option<Uuid>,
 ) -> PublicEventDetailResponse {
     let attendee_count = row.attendee_count;
     let capacity_remaining = public_event_capacity_remaining(row.capacity, attendee_count);
     let thumbnail = row.thumbnail_object_key.map(|object_key| PublicEventThumbnailResponse {
+        public_url: state.object_storage.public_url_for(&object_key),
         object_key,
         width: row.thumbnail_width.unwrap_or_default(),
         height: row.thumbnail_height.unwrap_or_default(),
