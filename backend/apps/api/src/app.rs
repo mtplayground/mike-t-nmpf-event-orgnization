@@ -4,10 +4,10 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     middleware,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use http::{HeaderValue, Method};
+use http::{HeaderMap, HeaderValue, Method, header};
 use image::{DynamicImage, GenericImageView, ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -468,15 +468,55 @@ struct PublicEventThumbnailResponse {
     bytes: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct PublicEventDetailResponse {
+    event: PublicEventDetailEventResponse,
+    host: PublicEventHostResponse,
+    attendee_count: i64,
+    capacity_remaining: Option<i32>,
+    current_user_registration_state: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEventDetailEventResponse {
+    id: Uuid,
+    host_id: Uuid,
+    title: String,
+    slug: String,
+    description_md: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_type: EventLocationType,
+    location_text: Option<String>,
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: EventVisibility,
+    status: EventStatus,
+    cover_image_id: Option<Uuid>,
+    thumbnail: Option<PublicEventThumbnailResponse>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicEventHostResponse {
+    id: Uuid,
+    display_name: String,
+    avatar_object_key: Option<String>,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
         .route("/me/events", get(list_my_events))
+        .route("/me/events/{id}", get(read_event))
         .route("/me/avatar/upload-url", post(create_avatar_upload_url))
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
         .route("/events", post(create_event))
-        .route("/events/{id}", get(read_event).patch(update_event).delete(cancel_event))
+        .route("/events/{id}", patch(update_event).delete(cancel_event))
         .route("/events/{id}/duplicate", post(duplicate_event))
         .route("/events/{id}/cover/upload-url", post(create_event_cover_upload_url))
         .route("/events/{id}/cover/confirm", post(confirm_event_cover_upload))
@@ -496,6 +536,7 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
         .route("/events", get(list_public_events))
+        .route("/events/{slug}", get(read_public_event))
         .route("/validation-probe", post(validation_probe))
         .merge(protected_routes)
         .with_state(state)
@@ -559,6 +600,21 @@ async fn list_public_events(
     let items = rows.into_iter().map(build_public_event_response).collect();
 
     Ok(Json(ApiResponse::new(PublicEventListResponse { items, next_cursor })))
+}
+
+async fn read_public_event(
+    State(state): State<SharedAppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<PublicEventDetailResponse>>, AppError> {
+    let slug = normalize_public_event_slug(&slug)?;
+    let current_user_id = optional_current_user_id(&state, &headers)?;
+    let row = events::find_public_event_by_slug(&state.db_pool, &slug)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found("event was not found"))?;
+
+    Ok(Json(ApiResponse::new(build_public_event_detail_response(row, current_user_id))))
 }
 
 async fn register(
@@ -1459,6 +1515,59 @@ fn build_public_event_response(row: events::PublicEventListRow) -> PublicEventRe
     }
 }
 
+fn build_public_event_detail_response(
+    row: events::PublicEventDetailRow,
+    _current_user_id: Option<Uuid>,
+) -> PublicEventDetailResponse {
+    let attendee_count = row.attendee_count;
+    let capacity_remaining = public_event_capacity_remaining(row.capacity, attendee_count);
+    let thumbnail = row.thumbnail_object_key.map(|object_key| PublicEventThumbnailResponse {
+        object_key,
+        width: row.thumbnail_width.unwrap_or_default(),
+        height: row.thumbnail_height.unwrap_or_default(),
+        bytes: row.thumbnail_bytes.unwrap_or_default(),
+    });
+
+    PublicEventDetailResponse {
+        event: PublicEventDetailEventResponse {
+            id: row.id,
+            host_id: row.host_id,
+            title: row.title,
+            slug: row.slug,
+            description_md: row.description_md,
+            start_at: row.start_at,
+            end_at: row.end_at,
+            timezone: row.timezone,
+            location_type: row.location_type,
+            location_text: row.location_text,
+            location_url: row.location_url,
+            capacity: row.capacity,
+            visibility: row.visibility,
+            status: row.status,
+            cover_image_id: row.cover_image_id,
+            thumbnail,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            cancelled_at: row.cancelled_at,
+        },
+        host: PublicEventHostResponse {
+            id: row.host_id,
+            display_name: row.host_display_name,
+            avatar_object_key: row.host_avatar_object_key,
+        },
+        attendee_count,
+        capacity_remaining,
+        current_user_registration_state: None,
+    }
+}
+
+fn public_event_capacity_remaining(capacity: Option<i32>, attendee_count: i64) -> Option<i32> {
+    capacity.map(|capacity| {
+        let remaining = i64::from(capacity) - attendee_count;
+        remaining.clamp(0, i64::from(i32::MAX)) as i32
+    })
+}
+
 async fn require_host_event(
     state: &SharedAppState,
     event_id: Uuid,
@@ -1505,6 +1614,42 @@ fn normalize_public_search_query(value: Option<&str>) -> Result<Option<String>, 
     }
 
     Ok(Some(value))
+}
+
+fn normalize_public_event_slug(value: &str) -> Result<String, AppError> {
+    let slug = normalize_required_text(value, "slug")?;
+
+    if slug.len() > 200 {
+        return Err(AppError::bad_request("slug must be 200 characters or fewer"));
+    }
+
+    Ok(slug)
+}
+
+fn optional_current_user_id(
+    state: &SharedAppState,
+    headers: &HeaderMap,
+) -> Result<Option<Uuid>, AppError> {
+    let Some(header_value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let header_str = header_value
+        .to_str()
+        .map_err(|_| AppError::unauthorized("invalid Authorization header"))?;
+    let (scheme, token) = header_str
+        .split_once(' ')
+        .ok_or_else(|| AppError::unauthorized("invalid Authorization header"))?;
+
+    if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+        return Err(AppError::unauthorized("invalid bearer token"));
+    }
+
+    let claims = state
+        .jwt_service
+        .verify_access_token(token.trim())
+        .map_err(|error| AppError::unauthorized(error.to_string()))?;
+
+    Ok(Some(claims.subject))
 }
 
 fn parse_optional_public_datetime(
@@ -2098,8 +2243,8 @@ mod tests {
 
     use super::{
         EventLocationType, EventStatus, EventVisibility, LoginRateLimiter, default_event_status,
-        slugify_event_title, validate_event_capacity, validate_event_location,
-        validate_event_times, validate_event_visibility_status,
+        public_event_capacity_remaining, slugify_event_title, validate_event_capacity,
+        validate_event_location, validate_event_times, validate_event_visibility_status,
     };
 
     #[tokio::test]
@@ -2199,5 +2344,12 @@ mod tests {
     fn event_slug_generation_normalizes_titles() {
         assert_eq!(slugify_event_title("  Mike T: Spring Gala!  "), "mike-t-spring-gala");
         assert_eq!(slugify_event_title("!!!"), "event");
+    }
+
+    #[test]
+    fn public_event_capacity_remaining_never_goes_negative() {
+        assert_eq!(public_event_capacity_remaining(Some(10), 4), Some(6));
+        assert_eq!(public_event_capacity_remaining(Some(10), 14), Some(0));
+        assert_eq!(public_event_capacity_remaining(None, 4), None);
     }
 }

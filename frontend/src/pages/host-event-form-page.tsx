@@ -146,7 +146,7 @@ export function HostEventFormPage({ mode }: HostEventFormPageProps) {
 
       try {
         const event = await authorizedRequest<EventResponse>(
-          `/events/${eventId}`,
+          `/me/events/${eventId}`,
           refreshSession,
         );
 
@@ -277,7 +277,7 @@ export function HostEventFormPage({ mode }: HostEventFormPageProps) {
           setCoverProgress,
         );
         savedEvent = await authorizedRequest<EventResponse>(
-          `/events/${event.id}`,
+          `/me/events/${event.id}`,
           refreshSession,
         );
       }
