@@ -52,6 +52,7 @@ async fn main() -> Result<(), io::Error> {
         email_verification_service,
         password_reset_service,
         login_rate_limiter: Arc::new(app::LoginRateLimiter::new()),
+        announcement_rate_limiter: Arc::new(app::AnnouncementRateLimiter::new()),
     });
     let address = config.server.socket_addr();
     let listener = TcpListener::bind(address).await?;
