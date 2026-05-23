@@ -1036,22 +1036,7 @@ async fn duplicate_event(
     let slug = unique_event_slug(&state, &duplicate_title, None).await?;
     let event = events::insert_event(
         &state.db_pool,
-        &events::NewEvent {
-            host_id: current_user.id,
-            title: duplicate_title,
-            slug,
-            description_md: existing.description_md,
-            start_at: existing.start_at,
-            end_at: existing.end_at,
-            timezone: existing.timezone,
-            location_type: existing.location_type,
-            location_text: existing.location_text,
-            location_url: existing.location_url,
-            capacity: existing.capacity,
-            visibility: EventVisibility::Draft,
-            status: EventStatus::Draft,
-            cover_image_id: None,
-        },
+        &events::duplicate_event_template(&existing, duplicate_title, slug),
     )
     .await
     .map_err(map_event_write_error)?;
@@ -1951,7 +1936,13 @@ struct LoginAttemptEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::LoginRateLimiter;
+    use chrono::{Duration, Utc};
+
+    use super::{
+        EventLocationType, EventStatus, EventVisibility, LoginRateLimiter, default_event_status,
+        slugify_event_title, validate_event_capacity, validate_event_location,
+        validate_event_times, validate_event_visibility_status,
+    };
 
     #[tokio::test]
     async fn login_rate_limiter_blocks_after_failure_limit() {
@@ -1976,5 +1967,79 @@ mod tests {
         limiter.record_success("user@example.com").await;
 
         assert!(limiter.check("user@example.com").await.is_ok());
+    }
+
+    #[test]
+    fn event_time_validation_rejects_end_before_start() {
+        let start_at = Utc::now();
+        let end_at = start_at - Duration::minutes(1);
+
+        let error = validate_event_times(start_at, end_at)
+            .expect_err("end before start should fail validation");
+
+        assert!(error.to_string().contains("end_at must be at or after start_at"));
+    }
+
+    #[test]
+    fn event_location_validation_requires_fields_by_location_type() {
+        let in_person_error = validate_event_location(EventLocationType::InPerson, None, None)
+            .expect_err("in-person events require a physical location");
+        let virtual_error = validate_event_location(EventLocationType::Virtual, None, None)
+            .expect_err("virtual events require a URL");
+        let hybrid_error = validate_event_location(EventLocationType::Hybrid, Some("Hall"), None)
+            .expect_err("hybrid events require both location forms");
+
+        assert!(in_person_error.to_string().contains("location_text is required"));
+        assert!(virtual_error.to_string().contains("location_url is required"));
+        assert!(hybrid_error.to_string().contains("location_text and location_url"));
+        assert!(
+            validate_event_location(EventLocationType::Hybrid, Some("Hall"), Some("https://meet"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn event_capacity_validation_rejects_non_positive_values() {
+        assert!(validate_event_capacity(Some(1)).is_ok());
+
+        let zero_error = validate_event_capacity(Some(0)).expect_err("zero capacity should fail");
+        let negative_error =
+            validate_event_capacity(Some(-1)).expect_err("negative capacity should fail");
+
+        assert!(zero_error.to_string().contains("capacity must be greater than zero"));
+        assert!(negative_error.to_string().contains("capacity must be greater than zero"));
+    }
+
+    #[test]
+    fn event_visibility_status_validation_enforces_draft_pairing() {
+        assert_eq!(default_event_status(EventVisibility::Draft), EventStatus::Draft);
+        assert_eq!(default_event_status(EventVisibility::Public), EventStatus::Published);
+        assert!(
+            validate_event_visibility_status(EventVisibility::Draft, EventStatus::Draft).is_ok()
+        );
+        assert!(
+            validate_event_visibility_status(EventVisibility::Public, EventStatus::Published)
+                .is_ok()
+        );
+
+        let public_draft_error =
+            validate_event_visibility_status(EventVisibility::Public, EventStatus::Draft)
+                .expect_err("draft status with public visibility should fail");
+        let draft_published_error =
+            validate_event_visibility_status(EventVisibility::Draft, EventStatus::Published)
+                .expect_err("published status with draft visibility should fail");
+
+        assert!(public_draft_error.to_string().contains("draft events must use draft visibility"));
+        assert!(
+            draft_published_error
+                .to_string()
+                .contains("published events cannot use draft visibility")
+        );
+    }
+
+    #[test]
+    fn event_slug_generation_normalizes_titles() {
+        assert_eq!(slugify_event_title("  Mike T: Spring Gala!  "), "mike-t-spring-gala");
+        assert_eq!(slugify_event_title("!!!"), "event");
     }
 }
