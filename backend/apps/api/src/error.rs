@@ -42,6 +42,7 @@ pub enum AppError {
     BadRequest { message: String },
     Conflict { message: String },
     NotFound { message: String },
+    RateLimited { message: String },
     Unauthorized { message: String },
     Internal { message: String },
     Validation(ValidationErrors),
@@ -62,6 +63,10 @@ impl AppError {
         Self::NotFound { message: message.into() }
     }
 
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::RateLimited { message: message.into() }
+    }
+
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::Unauthorized { message: message.into() }
     }
@@ -77,6 +82,7 @@ impl AppError {
             }
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
             Self::Internal { .. } | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -87,6 +93,7 @@ impl AppError {
             Self::BadRequest { .. } => "bad_request",
             Self::Conflict { .. } => "conflict",
             Self::NotFound { .. } => "not_found",
+            Self::RateLimited { .. } => "rate_limited",
             Self::Unauthorized { .. } => "unauthorized",
             Self::Internal { .. } => "internal_error",
             Self::Validation(_) => "validation_failed",
@@ -100,6 +107,7 @@ impl AppError {
             Self::BadRequest { message } => message.clone(),
             Self::Conflict { message } => message.clone(),
             Self::NotFound { message } => message.clone(),
+            Self::RateLimited { message } => message.clone(),
             Self::Unauthorized { message } => message.clone(),
             Self::Internal { message } => message.clone(),
             Self::Validation(_) => "One or more request fields failed validation.".to_owned(),
@@ -157,6 +165,7 @@ impl fmt::Display for AppError {
             Self::BadRequest { message } => formatter.write_str(message),
             Self::Conflict { message } => formatter.write_str(message),
             Self::NotFound { message } => formatter.write_str(message),
+            Self::RateLimited { message } => formatter.write_str(message),
             Self::Unauthorized { message } => formatter.write_str(message),
             Self::Internal { message } => formatter.write_str(message),
             Self::Validation(_) => formatter.write_str("request validation failed"),

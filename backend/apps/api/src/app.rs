@@ -57,6 +57,7 @@ pub struct AppState {
     pub email_verification_service: EmailVerificationService,
     pub password_reset_service: PasswordResetService,
     pub login_rate_limiter: Arc<LoginRateLimiter>,
+    pub announcement_rate_limiter: Arc<AnnouncementRateLimiter>,
 }
 
 pub type SharedAppState = Arc<AppState>;
@@ -1184,6 +1185,10 @@ async fn send_event_announcement(
     let event = require_host_event(&state, event_id, current_user.id).await?;
     let subject = normalize_required_text(&payload.subject, "subject")?;
     let body = normalize_required_text(&payload.body, "body")?;
+    let rate_limit_key = announcement_rate_limit_key(current_user.id, event_id);
+
+    state.announcement_rate_limiter.check_and_record(&rate_limit_key).await?;
+
     let attendees = registrations::list_active_attendees_for_event(&state.db_pool, event_id)
         .await
         .map_err(AppError::from)?;
@@ -2506,14 +2511,61 @@ struct LoginAttemptEntry {
     blocked_until: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+pub struct AnnouncementRateLimiter {
+    entries: Mutex<HashMap<String, AnnouncementRateLimitEntry>>,
+}
+
+impl AnnouncementRateLimiter {
+    const ANNOUNCEMENT_LIMIT: u32 = 3;
+    const WINDOW_MINUTES: i64 = 60;
+
+    pub fn new() -> Self {
+        Self { entries: Mutex::new(HashMap::new()) }
+    }
+
+    async fn check_and_record(&self, key: &str) -> Result<(), AppError> {
+        let mut entries = self.entries.lock().await;
+        let now = Utc::now();
+        let entry = entries
+            .entry(key.to_owned())
+            .or_insert(AnnouncementRateLimitEntry { count: 0, window_started_at: now });
+
+        if now - entry.window_started_at >= Duration::minutes(Self::WINDOW_MINUTES) {
+            entry.count = 0;
+            entry.window_started_at = now;
+        }
+
+        if entry.count >= Self::ANNOUNCEMENT_LIMIT {
+            return Err(AppError::rate_limited(
+                "too many announcements for this event; please retry later",
+            ));
+        }
+
+        entry.count += 1;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct AnnouncementRateLimitEntry {
+    count: u32,
+    window_started_at: DateTime<Utc>,
+}
+
+fn announcement_rate_limit_key(host_id: Uuid, event_id: Uuid) -> String {
+    format!("{host_id}:{event_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use uuid::Uuid;
 
     use super::{
-        EventLocationType, EventStatus, EventVisibility, LoginRateLimiter, default_event_status,
-        build_attendees_csv, public_event_capacity_remaining, slugify_event_title,
+        AnnouncementRateLimiter, EventLocationType, EventStatus, EventVisibility,
+        LoginRateLimiter, announcement_rate_limit_key, build_attendees_csv,
+        default_event_status, public_event_capacity_remaining, slugify_event_title,
         validate_event_capacity, validate_event_location, validate_event_times,
         validate_event_visibility_status,
     };
@@ -2542,6 +2594,29 @@ mod tests {
         limiter.record_success("user@example.com").await;
 
         assert!(limiter.check("user@example.com").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn announcement_rate_limiter_blocks_after_event_limit() {
+        let limiter = AnnouncementRateLimiter::new();
+        let key = announcement_rate_limit_key(
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+        );
+
+        for _ in 0..AnnouncementRateLimiter::ANNOUNCEMENT_LIMIT {
+            limiter
+                .check_and_record(&key)
+                .await
+                .expect("announcement should be allowed before limit");
+        }
+
+        let error = limiter
+            .check_and_record(&key)
+            .await
+            .expect_err("announcement should be blocked after limit");
+
+        assert!(error.to_string().contains("too many announcements"));
     }
 
     #[test]
