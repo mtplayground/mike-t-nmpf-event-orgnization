@@ -4,6 +4,7 @@ import { ProtectedRoute } from '@/components/protected-route';
 import { RootLayout } from '@/components/root-layout';
 import { AttendeePage } from '@/pages/attendee-page';
 import { AuthPage } from '@/pages/auth-page';
+import { EventDetailPage } from '@/pages/event-detail-page';
 import { ForgotPasswordPage } from '@/pages/forgot-password-page';
 import { HostEventAttendeesPage } from '@/pages/host-event-attendees-page';
 import { HostEventFormPage } from '@/pages/host-event-form-page';
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
       { path: 'auth/verify-email', element: <VerifyEmailPage /> },
       { path: 'auth/forgot-password', element: <ForgotPasswordPage /> },
       { path: 'auth/reset-password', element: <ResetPasswordPage /> },
+      { path: 'events/:slug', element: <EventDetailPage /> },
       {
         path: 'profile',
         element: (

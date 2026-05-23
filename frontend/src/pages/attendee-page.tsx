@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -293,9 +294,9 @@ function DiscoveryEventCard({ event }: { event: PublicEvent }) {
           <span className="rounded-full border border-border/70 bg-secondary/40 px-2.5 py-1 text-xs font-medium text-muted-foreground">
             {event.capacity ? `${event.capacity} seats` : 'Open capacity'}
           </span>
-          <span className="truncate text-xs font-medium text-muted-foreground">
-            {event.slug}
-          </span>
+          <Button asChild size="sm" variant="outline">
+            <Link to={`/events/${event.slug}`}>Details</Link>
+          </Button>
         </div>
       </div>
     </article>
