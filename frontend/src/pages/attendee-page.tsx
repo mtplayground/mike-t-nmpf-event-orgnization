@@ -8,6 +8,7 @@ import {
 import {
   CalendarDays,
   ImageIcon,
+  Inbox,
   LoaderCircle,
   MapPin,
   RefreshCw,
@@ -19,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { EmptyStatePanel } from '@/components/state-panels';
 import { requestJson } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 
@@ -425,9 +427,11 @@ export function AttendeePage() {
       {loading ? <EventGridSkeleton /> : null}
 
       {!loading && events.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-6 text-sm text-muted-foreground">
-          No upcoming public events match the current filters.
-        </div>
+        <EmptyStatePanel
+          body="Adjust the search or date filter to broaden discovery."
+          icon={Inbox}
+          title="No upcoming public events match the current filters."
+        />
       ) : null}
 
       {!loading && events.length > 0 ? (
@@ -567,11 +571,19 @@ function RegistrationDashboard({
         {loading ? <RegistrationListSkeleton /> : null}
 
         {!loading && registrations.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-border/70 bg-background/70 p-5 text-sm text-muted-foreground">
-            {bucket === 'upcoming'
-              ? 'No upcoming registered events yet.'
-              : 'No past registered events yet.'}
-          </div>
+          <EmptyStatePanel
+            body={
+              bucket === 'upcoming'
+                ? 'Register for an event to keep it visible here.'
+                : 'Past registrations appear here after an event has ended.'
+            }
+            icon={Inbox}
+            title={
+              bucket === 'upcoming'
+                ? 'No upcoming registered events yet.'
+                : 'No past registered events yet.'
+            }
+          />
         ) : null}
 
         {!loading && registrations.length > 0 ? (

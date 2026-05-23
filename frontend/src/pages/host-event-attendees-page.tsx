@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   Download,
+  Inbox,
   LoaderCircle,
   MailPlus,
   RefreshCw,
   Send,
-  Users,
   X,
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
@@ -19,6 +19,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { EmptyStatePanel } from '@/components/state-panels';
 import { requestJson } from '@/lib/api-client';
 import { appConfig } from '@/lib/config';
 import { cn } from '@/lib/utils';
@@ -240,10 +241,11 @@ export function HostEventAttendeesPage() {
           {loading ? (
             <LoadingTable />
           ) : attendees.length === 0 ? (
-            <div className="flex items-center gap-3 rounded-2xl border border-dashed border-border/70 p-5 text-sm text-muted-foreground">
-              <Users className="h-5 w-5 shrink-0" />
-              No registrations yet.
-            </div>
+            <EmptyStatePanel
+              body="Registered attendees will appear here with status and export details."
+              icon={Inbox}
+              title="No registrations yet."
+            />
           ) : (
             <AttendeesTable attendees={attendees} />
           )}

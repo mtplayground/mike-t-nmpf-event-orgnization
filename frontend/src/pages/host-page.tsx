@@ -3,6 +3,7 @@ import {
   CalendarPlus,
   Copy,
   Edit3,
+  Inbox,
   LoaderCircle,
   RefreshCw,
   Trash2,
@@ -18,6 +19,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { EmptyStatePanel } from '@/components/state-panels';
 import { requestJson } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { useAuthStore } from '@/stores/auth-store';
@@ -441,12 +443,14 @@ function EmptyState({ activeTab }: { activeTab: HostEventTab }) {
       : activeTab === 'upcoming'
         ? 'No upcoming events are published.'
         : 'No past events yet.';
+  const body =
+    activeTab === 'draft'
+      ? 'Create an event to start collecting details before publishing.'
+      : activeTab === 'upcoming'
+        ? 'Published future events appear here after they are saved as public, unlisted, or private.'
+        : 'Completed and ended published events appear here for later review.';
 
-  return (
-    <div className="rounded-2xl border border-dashed border-border/70 p-5 text-sm text-muted-foreground">
-      {message}
-    </div>
-  );
+  return <EmptyStatePanel body={body} icon={Inbox} title={message} />;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
