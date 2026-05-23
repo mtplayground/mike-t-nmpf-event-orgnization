@@ -401,6 +401,13 @@ struct ListEventsQuery {
     per_page: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListRegistrationsQuery {
+    bucket: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct HostEventListResponse {
     items: Vec<HostEventListItemResponse>,
@@ -447,6 +454,45 @@ struct HostEventAttendeeResponse {
     display_name: String,
     status: registrations::RegistrationStatus,
     registered_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttendeeRegistrationListResponse {
+    items: Vec<AttendeeRegistrationItemResponse>,
+    page: i64,
+    per_page: i64,
+    total_count: i64,
+    total_pages: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AttendeeRegistrationItemResponse {
+    registration_id: Uuid,
+    status: registrations::RegistrationStatus,
+    registered_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+    event: AttendeeRegistrationEventResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct AttendeeRegistrationEventResponse {
+    id: Uuid,
+    host_id: Uuid,
+    host_display_name: String,
+    title: String,
+    slug: String,
+    description_md: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_type: EventLocationType,
+    location_text: Option<String>,
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: EventVisibility,
+    status: EventStatus,
+    cover_image_id: Option<Uuid>,
     cancelled_at: Option<DateTime<Utc>>,
 }
 
@@ -565,6 +611,7 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
         .route("/me/events", get(list_my_events))
+        .route("/me/registrations", get(list_my_registrations))
         .route("/me/events/{id}", get(read_event))
         .route("/me/avatar/upload-url", post(create_avatar_upload_url))
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
@@ -1129,6 +1176,48 @@ async fn list_my_events(
     let total_pages = if total_count == 0 { 0 } else { (total_count + per_page - 1) / per_page };
 
     Ok(Json(ApiResponse::new(HostEventListResponse {
+        items,
+        page,
+        per_page,
+        total_count,
+        total_pages,
+    })))
+}
+
+async fn list_my_registrations(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    Query(query): Query<ListRegistrationsQuery>,
+) -> Result<Json<ApiResponse<AttendeeRegistrationListResponse>>, AppError> {
+    let bucket = parse_attendee_registration_bucket(query.bucket.as_deref())?;
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+
+    validate_pagination(page, per_page)?;
+
+    let offset = page
+        .checked_sub(1)
+        .and_then(|page_index| page_index.checked_mul(per_page))
+        .ok_or_else(|| AppError::bad_request("page is too large"))?;
+    let items = registrations::list_registrations_for_user(
+        &state.db_pool,
+        current_user.id,
+        bucket,
+        per_page,
+        offset,
+    )
+    .await
+    .map_err(AppError::from)?
+    .into_iter()
+    .map(build_attendee_registration_response)
+    .collect();
+    let total_count =
+        registrations::count_registrations_for_user(&state.db_pool, current_user.id, bucket)
+            .await
+            .map_err(AppError::from)?;
+    let total_pages = if total_count == 0 { 0 } else { (total_count + per_page - 1) / per_page };
+
+    Ok(Json(ApiResponse::new(AttendeeRegistrationListResponse {
         items,
         page,
         per_page,
@@ -1713,6 +1802,36 @@ fn build_host_event_attendee_response(
     }
 }
 
+fn build_attendee_registration_response(
+    row: registrations::AttendeeRegistrationRow,
+) -> AttendeeRegistrationItemResponse {
+    AttendeeRegistrationItemResponse {
+        registration_id: row.registration_id,
+        status: row.registration_status,
+        registered_at: row.registered_at,
+        cancelled_at: row.registration_cancelled_at,
+        event: AttendeeRegistrationEventResponse {
+            id: row.event_id,
+            host_id: row.host_id,
+            host_display_name: row.host_display_name,
+            title: row.title,
+            slug: row.slug,
+            description_md: row.description_md,
+            start_at: row.start_at,
+            end_at: row.end_at,
+            timezone: row.timezone,
+            location_type: row.location_type,
+            location_text: row.location_text,
+            location_url: row.location_url,
+            capacity: row.capacity,
+            visibility: row.visibility,
+            status: row.status,
+            cover_image_id: row.cover_image_id,
+            cancelled_at: row.event_cancelled_at,
+        },
+    }
+}
+
 fn build_registration_response(registration: registrations::Registration) -> RegistrationResponse {
     RegistrationResponse {
         id: registration.id,
@@ -1863,6 +1982,18 @@ fn parse_host_event_list_filter(
         Some("upcoming") => Ok(events::HostEventListFilter::Upcoming),
         Some("past") => Ok(events::HostEventListFilter::Past),
         _ => Err(AppError::bad_request("status must be one of draft, upcoming, or past")),
+    }
+}
+
+fn parse_attendee_registration_bucket(
+    value: Option<&str>,
+) -> Result<registrations::AttendeeRegistrationBucket, AppError> {
+    match value.map(str::trim) {
+        None | Some("") => Err(AppError::bad_request("bucket must be provided")),
+        Some(value) if value.len() > 32 => Err(AppError::bad_request("bucket is too long")),
+        Some("upcoming") => Ok(registrations::AttendeeRegistrationBucket::Upcoming),
+        Some("past") => Ok(registrations::AttendeeRegistrationBucket::Past),
+        _ => Err(AppError::bad_request("bucket must be one of upcoming or past")),
     }
 }
 
@@ -2565,11 +2696,13 @@ mod tests {
     use super::{
         AnnouncementRateLimiter, EventLocationType, EventStatus, EventVisibility,
         LoginRateLimiter, announcement_rate_limit_key, build_attendees_csv,
-        default_event_status, public_event_capacity_remaining, slugify_event_title,
-        validate_event_capacity, validate_event_location, validate_event_times,
-        validate_event_visibility_status,
+        default_event_status, parse_attendee_registration_bucket,
+        public_event_capacity_remaining, slugify_event_title, validate_event_capacity,
+        validate_event_location, validate_event_times, validate_event_visibility_status,
     };
-    use crate::registrations::{HostAttendeeRow, RegistrationStatus};
+    use crate::registrations::{
+        AttendeeRegistrationBucket, HostAttendeeRow, RegistrationStatus,
+    };
 
     #[tokio::test]
     async fn login_rate_limiter_blocks_after_failure_limit() {
@@ -2685,6 +2818,20 @@ mod tests {
                 .to_string()
                 .contains("published events cannot use draft visibility")
         );
+    }
+
+    #[test]
+    fn attendee_registration_bucket_parser_accepts_known_buckets() {
+        assert_eq!(
+            parse_attendee_registration_bucket(Some("upcoming")).unwrap(),
+            AttendeeRegistrationBucket::Upcoming,
+        );
+        assert_eq!(
+            parse_attendee_registration_bucket(Some("past")).unwrap(),
+            AttendeeRegistrationBucket::Past,
+        );
+        assert!(parse_attendee_registration_bucket(Some("draft")).is_err());
+        assert!(parse_attendee_registration_bucket(None).is_err());
     }
 
     #[test]

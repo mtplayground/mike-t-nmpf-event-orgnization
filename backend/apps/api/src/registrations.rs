@@ -29,6 +29,37 @@ pub struct HostAttendeeRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttendeeRegistrationBucket {
+    Upcoming,
+    Past,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct AttendeeRegistrationRow {
+    pub registration_id: Uuid,
+    pub registration_status: RegistrationStatus,
+    pub registered_at: DateTime<Utc>,
+    pub registration_cancelled_at: Option<DateTime<Utc>>,
+    pub event_id: Uuid,
+    pub host_id: Uuid,
+    pub title: String,
+    pub slug: String,
+    pub description_md: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+    pub location_type: crate::events::EventLocationType,
+    pub location_text: Option<String>,
+    pub location_url: Option<String>,
+    pub capacity: Option<i32>,
+    pub visibility: crate::events::EventVisibility,
+    pub status: crate::events::EventStatus,
+    pub cover_image_id: Option<Uuid>,
+    pub event_cancelled_at: Option<DateTime<Utc>>,
+    pub host_display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationInsertOutcome {
     Registered,
     AlreadyRegistered,
@@ -190,6 +221,50 @@ pub async fn list_active_attendees_for_event(
         .bind(event_id)
         .fetch_all(pool)
         .await
+}
+
+pub async fn list_registrations_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    bucket: AttendeeRegistrationBucket,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<AttendeeRegistrationRow>, sqlx::Error> {
+    let query = format!(
+        r#"
+        {}
+        {}
+        ORDER BY {}
+        LIMIT $2
+        OFFSET $3
+        "#,
+        ATTENDEE_REGISTRATION_SELECT_SQL,
+        attendee_registration_from_where_sql(bucket),
+        attendee_registration_order_sql(bucket),
+    );
+
+    sqlx::query_as::<_, AttendeeRegistrationRow>(&query)
+        .bind(user_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn count_registrations_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    bucket: AttendeeRegistrationBucket,
+) -> Result<i64, sqlx::Error> {
+    let query = format!(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        {}
+        "#,
+        attendee_registration_from_where_sql(bucket),
+    );
+
+    sqlx::query_scalar::<_, i64>(&query).bind(user_id).fetch_one(pool).await
 }
 
 async fn find_registration_for_user_in_tx(
@@ -367,6 +442,73 @@ pub const LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL: &str = r#"
     ORDER BY registrations.registered_at ASC, users.display_name ASC
 "#;
 
+pub const ATTENDEE_REGISTRATION_SELECT_SQL: &str = r#"
+    SELECT
+        registrations.id AS registration_id,
+        registrations.status AS registration_status,
+        registrations.registered_at,
+        registrations.cancelled_at AS registration_cancelled_at,
+        events.id AS event_id,
+        events.host_id,
+        events.title,
+        events.slug,
+        events.description_md,
+        events.start_at,
+        events.end_at,
+        events.timezone,
+        events.location_type,
+        events.location_text,
+        events.location_url,
+        events.capacity,
+        events.visibility,
+        events.status,
+        events.cover_image_id,
+        events.cancelled_at AS event_cancelled_at,
+        users.display_name AS host_display_name
+"#;
+
+fn attendee_registration_from_where_sql(bucket: AttendeeRegistrationBucket) -> &'static str {
+    match bucket {
+        AttendeeRegistrationBucket::Upcoming => {
+            r#"
+            FROM registrations
+            INNER JOIN events
+              ON events.id = registrations.event_id
+            INNER JOIN users
+              ON users.id = events.host_id
+            WHERE registrations.user_id = $1
+              AND registrations.status = 'registered'
+              AND events.status = 'published'
+              AND events.cancelled_at IS NULL
+              AND events.end_at >= NOW()
+            "#
+        }
+        AttendeeRegistrationBucket::Past => {
+            r#"
+            FROM registrations
+            INNER JOIN events
+              ON events.id = registrations.event_id
+            INNER JOIN users
+              ON users.id = events.host_id
+            WHERE registrations.user_id = $1
+              AND registrations.status = 'registered'
+              AND (
+                events.end_at < NOW()
+                OR events.status IN ('completed', 'cancelled')
+                OR events.cancelled_at IS NOT NULL
+              )
+            "#
+        }
+    }
+}
+
+fn attendee_registration_order_sql(bucket: AttendeeRegistrationBucket) -> &'static str {
+    match bucket {
+        AttendeeRegistrationBucket::Upcoming => "events.start_at ASC, events.id ASC",
+        AttendeeRegistrationBucket::Past => "events.start_at DESC, events.id DESC",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrationStatusParseError {
     value: String,
@@ -385,9 +527,11 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        ACTIVE_REGISTRATION_COUNT_SQL, CANCEL_REGISTRATION_SQL, EVENT_CAPACITY_LOCK_SQL,
+        ACTIVE_REGISTRATION_COUNT_SQL, ATTENDEE_REGISTRATION_SELECT_SQL,
+        AttendeeRegistrationBucket, CANCEL_REGISTRATION_SQL, EVENT_CAPACITY_LOCK_SQL,
         LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL, LIST_ATTENDEES_FOR_EVENT_SQL, RegistrationStatus,
         SELECT_REGISTRATION_FOR_USER_FOR_UPDATE_SQL, UPSERT_REGISTERED_REGISTRATION_SQL,
+        attendee_registration_from_where_sql, attendee_registration_order_sql,
     };
 
     #[test]
@@ -452,6 +596,35 @@ mod tests {
         assert!(!LIST_ATTENDEES_FOR_EVENT_SQL.contains("registrations.status = 'registered'"));
         assert!(
             LIST_ACTIVE_ATTENDEES_FOR_EVENT_SQL.contains("registrations.status = 'registered'")
+        );
+    }
+
+    #[test]
+    fn attendee_dashboard_queries_filter_by_bucket_and_current_user() {
+        assert!(ATTENDEE_REGISTRATION_SELECT_SQL.contains("registrations.id AS registration_id"));
+        assert!(ATTENDEE_REGISTRATION_SELECT_SQL.contains("events.title"));
+        assert!(
+            ATTENDEE_REGISTRATION_SELECT_SQL.contains("users.display_name AS host_display_name")
+        );
+
+        let upcoming_where =
+            attendee_registration_from_where_sql(AttendeeRegistrationBucket::Upcoming);
+        assert!(upcoming_where.contains("registrations.user_id = $1"));
+        assert!(upcoming_where.contains("registrations.status = 'registered'"));
+        assert!(upcoming_where.contains("events.status = 'published'"));
+        assert!(upcoming_where.contains("events.end_at >= NOW()"));
+        assert_eq!(
+            attendee_registration_order_sql(AttendeeRegistrationBucket::Upcoming),
+            "events.start_at ASC, events.id ASC",
+        );
+
+        let past_where = attendee_registration_from_where_sql(AttendeeRegistrationBucket::Past);
+        assert!(past_where.contains("registrations.user_id = $1"));
+        assert!(past_where.contains("events.end_at < NOW()"));
+        assert!(past_where.contains("events.status IN ('completed', 'cancelled')"));
+        assert_eq!(
+            attendee_registration_order_sql(AttendeeRegistrationBucket::Past),
+            "events.start_at DESC, events.id DESC",
         );
     }
 }
