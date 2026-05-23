@@ -1,14 +1,22 @@
-use std::{collections::HashMap, io::Cursor, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    sync::Arc,
+    time::Duration as StdDuration,
+};
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use http::{HeaderMap, HeaderValue, Method, header};
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header,
+};
 use image::{DynamicImage, GenericImageView, ImageFormat, imageops::FilterType};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -18,7 +26,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
-use tracing::info;
+use tracing::{Span, field, info};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -45,6 +53,11 @@ const EVENT_COVER_UPLOAD_URL_TTL_SECONDS: u64 = 900;
 const EVENT_COVER_HERO_MAX_WIDTH: u32 = 1200;
 const EVENT_COVER_THUMBNAIL_MAX_WIDTH: u32 = 480;
 const PUBLIC_EVENT_PAGE_SIZE: usize = 20;
+const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
+const REQUEST_ID_MAX_LENGTH: usize = 128;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestId(pub String);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -649,13 +662,98 @@ pub fn router(state: SharedAppState) -> Router {
         .with_state(state)
         .layer(CompressionLayer::new())
         .layer(build_cors_layer())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_request(|_request: &Request<Body>, span: &Span| {
+                    info!(parent: span, "request started");
+                })
+                .on_response(|response: &Response, latency: StdDuration, span: &Span| {
+                    log_http_response(response.status(), latency, span);
+                }),
+        )
+        .layer(middleware::from_fn(assign_request_id))
 }
 
 async fn health(State(state): State<SharedAppState>) -> Json<ApiResponse<HealthResponse>> {
     let _db_pool = &state.db_pool;
     let _object_storage = &state.object_storage;
     Json(ApiResponse::new(HealthResponse { status: "ok" }))
+}
+
+async fn assign_request_id(
+    mut request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let request_id = request_id_from_headers(request.headers());
+    request.extensions_mut().insert(RequestId(request_id.clone()));
+    request.headers_mut().insert(
+        REQUEST_ID_HEADER,
+        HeaderValue::from_str(&request_id)
+            .expect("generated request IDs are valid header values"),
+    );
+
+    let mut response = next.run(request).await;
+
+    response.headers_mut().insert(
+        REQUEST_ID_HEADER,
+        HeaderValue::from_str(&request_id)
+            .expect("generated request IDs are valid header values"),
+    );
+
+    response
+}
+
+fn make_request_span(request: &Request<Body>) -> Span {
+    let request_id = request_id_from_headers(request.headers());
+
+    tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %request.method(),
+        path = %request.uri().path(),
+        query = request.uri().query().unwrap_or(""),
+        version = ?request.version(),
+        user_id = field::Empty,
+    )
+}
+
+fn log_http_response(status: StatusCode, latency: StdDuration, span: &Span) {
+    let latency_ms = latency.as_secs_f64() * 1000.0;
+
+    if status.is_server_error() {
+        tracing::error!(
+            parent: span,
+            status = status.as_u16(),
+            latency_ms,
+            "request completed with server error"
+        );
+    } else if status.is_client_error() {
+        tracing::warn!(
+            parent: span,
+            status = status.as_u16(),
+            latency_ms,
+            "request completed with client error"
+        );
+    } else {
+        info!(
+            parent: span,
+            status = status.as_u16(),
+            latency_ms,
+            "request completed"
+        );
+    }
+}
+
+fn request_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get(&REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| value.len() <= REQUEST_ID_MAX_LENGTH)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 async fn validation_probe(
@@ -1700,6 +1798,8 @@ fn build_cors_layer() -> CorsLayer {
             origin == HeaderValue::from_static("http://localhost:8080")
                 || origin == HeaderValue::from_static("http://127.0.0.1:8080")
         }))
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, REQUEST_ID_HEADER])
+        .expose_headers([REQUEST_ID_HEADER])
 }
 
 fn normalize_email(email: &str) -> String {
@@ -2691,14 +2791,16 @@ fn announcement_rate_limit_key(host_id: Uuid, event_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
+    use http::{HeaderMap, HeaderValue};
     use uuid::Uuid;
 
     use super::{
         AnnouncementRateLimiter, EventLocationType, EventStatus, EventVisibility,
         LoginRateLimiter, announcement_rate_limit_key, build_attendees_csv,
         default_event_status, parse_attendee_registration_bucket,
-        public_event_capacity_remaining, slugify_event_title, validate_event_capacity,
-        validate_event_location, validate_event_times, validate_event_visibility_status,
+        public_event_capacity_remaining, request_id_from_headers, slugify_event_title,
+        validate_event_capacity, validate_event_location, validate_event_times,
+        validate_event_visibility_status, REQUEST_ID_HEADER,
     };
     use crate::registrations::{
         AttendeeRegistrationBucket, HostAttendeeRow, RegistrationStatus,
@@ -2750,6 +2852,22 @@ mod tests {
             .expect_err("announcement should be blocked after limit");
 
         assert!(error.to_string().contains("too many announcements"));
+    }
+
+    #[test]
+    fn request_id_from_headers_reuses_valid_inbound_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, HeaderValue::from_static("request-123"));
+
+        assert_eq!(request_id_from_headers(&headers), "request-123");
+    }
+
+    #[test]
+    fn request_id_from_headers_generates_missing_value() {
+        let headers = HeaderMap::new();
+        let request_id = request_id_from_headers(&headers);
+
+        assert!(Uuid::parse_str(&request_id).is_ok());
     }
 
     #[test]

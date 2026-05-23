@@ -4,6 +4,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use tracing::{field, Span};
 
 use crate::{
     app::SharedAppState,
@@ -26,6 +27,7 @@ pub async fn require_current_user(
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::unauthorized("authenticated user was not found"))?;
 
+    Span::current().record("user_id", field::display(user.id));
     request.extensions_mut().insert::<AuthUserContext>(user);
 
     Ok(next.run(request).await)
