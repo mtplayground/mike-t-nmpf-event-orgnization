@@ -83,3 +83,59 @@ npm install
 export VITE_API_BASE_URL=http://127.0.0.1:8080
 npm run dev -- --host 0.0.0.0 --port 8080
 ```
+
+## Deployment
+
+This repository ships script-based deployment packaging only. There is no
+Dockerfile and no CI deployment workflow.
+
+### Build release artifacts
+
+Build the backend release binary into `dist/backend/event-organization-api`:
+
+```bash
+./scripts/build-backend-release.sh
+```
+
+Build the frontend static bundle into `dist/frontend`:
+
+```bash
+export VITE_API_BASE_URL=https://events.example.com/api
+./scripts/build-frontend-bundle.sh
+```
+
+Set `TARGET_DIR` to write either artifact somewhere else:
+
+```bash
+TARGET_DIR=/opt/event-organization/backend ./scripts/build-backend-release.sh
+TARGET_DIR=/var/www/event-organization/frontend ./scripts/build-frontend-bundle.sh
+```
+
+### Runtime checklist
+
+1. Provision PostgreSQL and set the production `DATABASE_URL`.
+2. Configure all keys listed in `.env.example`; use `deploy/ENVIRONMENT.md` as
+   the production checklist.
+3. Run migrations before starting a new release:
+
+   ```bash
+   cd backend
+   cargo sqlx migrate run --source apps/api/migrations
+   ```
+
+   The API also runs embedded migrations on startup, but an explicit migration
+   step makes deploy failures easier to diagnose.
+4. Install the backend binary on the API host and run it with the production
+   environment loaded.
+5. Copy the frontend bundle to the web root used by nginx.
+6. Adapt `deploy/nginx/event-organization.conf` for the public hostname and
+   release paths, then reload nginx.
+7. Verify:
+   - `GET /api/health` returns `{ "data": { "status": "ok" } }`.
+   - The frontend loads from the public hostname.
+   - Registration email, object upload, and event cover processing work against
+     the production SMTP and object storage providers.
+
+The sample nginx config serves the Vite single-page app and proxies `/api/` to
+the Rust API on `127.0.0.1:8080`. When using that config, build the frontend
+with `VITE_API_BASE_URL` set to the public `/api` URL.
