@@ -62,6 +62,36 @@ pub struct EventChanges {
     pub cover_image_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostEventListFilter {
+    Draft,
+    Upcoming,
+    Past,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct HostEventListRow {
+    pub id: Uuid,
+    pub host_id: Uuid,
+    pub title: String,
+    pub slug: String,
+    pub description_md: String,
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+    pub timezone: String,
+    pub location_type: EventLocationType,
+    pub location_text: Option<String>,
+    pub location_url: Option<String>,
+    pub capacity: Option<i32>,
+    pub visibility: EventVisibility,
+    pub status: EventStatus,
+    pub cover_image_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub attendee_count: i64,
+}
+
 pub async fn insert_event(pool: &PgPool, event: &NewEvent) -> Result<Event, sqlx::Error> {
     sqlx::query_as::<_, Event>(
         r#"
@@ -136,6 +166,71 @@ pub async fn insert_event(pool: &PgPool, event: &NewEvent) -> Result<Event, sqlx
     .bind(event.cover_image_id)
     .fetch_one(pool)
     .await
+}
+
+pub async fn list_events_for_host(
+    pool: &PgPool,
+    host_id: Uuid,
+    filter: HostEventListFilter,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<HostEventListRow>, sqlx::Error> {
+    let query = format!(
+        r#"
+        SELECT
+            id,
+            host_id,
+            title,
+            slug,
+            description_md,
+            start_at,
+            end_at,
+            timezone,
+            location_type,
+            location_text,
+            location_url,
+            capacity,
+            visibility,
+            status,
+            cover_image_id,
+            created_at,
+            updated_at,
+            cancelled_at,
+            0::BIGINT AS attendee_count
+        FROM events
+        WHERE host_id = $1
+          AND {}
+        ORDER BY start_at ASC, created_at ASC, id ASC
+        LIMIT $2
+        OFFSET $3
+        "#,
+        host_event_list_filter_sql(filter),
+    );
+
+    sqlx::query_as::<_, HostEventListRow>(&query)
+        .bind(host_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn count_events_for_host(
+    pool: &PgPool,
+    host_id: Uuid,
+    filter: HostEventListFilter,
+) -> Result<i64, sqlx::Error> {
+    let query = format!(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM events
+        WHERE host_id = $1
+          AND {}
+        "#,
+        host_event_list_filter_sql(filter),
+    );
+
+    sqlx::query_scalar::<_, i64>(&query).bind(host_id).fetch_one(pool).await
 }
 
 pub async fn find_event_for_host(
@@ -403,6 +498,16 @@ const EVENT_SELECT_BY_ID_AND_HOST: &str = r#"
     WHERE id = $1
       AND host_id = $2
 "#;
+
+fn host_event_list_filter_sql(filter: HostEventListFilter) -> &'static str {
+    match filter {
+        HostEventListFilter::Draft => "status = 'draft'",
+        HostEventListFilter::Upcoming => "status = 'published' AND end_at >= NOW()",
+        HostEventListFilter::Past => {
+            "(status = 'completed' OR (status = 'published' AND end_at < NOW()))"
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "TEXT")]

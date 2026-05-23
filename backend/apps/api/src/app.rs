@@ -2,7 +2,7 @@ use std::{collections::HashMap, io::Cursor, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     middleware,
     routing::{get, post},
 };
@@ -390,10 +390,50 @@ struct EventResponse {
     cancelled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListEventsQuery {
+    status: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct HostEventListResponse {
+    items: Vec<HostEventListItemResponse>,
+    page: i64,
+    per_page: i64,
+    total_count: i64,
+    total_pages: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct HostEventListItemResponse {
+    id: Uuid,
+    host_id: Uuid,
+    title: String,
+    slug: String,
+    description_md: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    timezone: String,
+    location_type: EventLocationType,
+    location_text: Option<String>,
+    location_url: Option<String>,
+    capacity: Option<i32>,
+    visibility: EventVisibility,
+    status: EventStatus,
+    cover_image_id: Option<Uuid>,
+    attendee_count: i64,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    cancelled_at: Option<DateTime<Utc>>,
+}
+
 pub fn router(state: SharedAppState) -> Router {
     let protected_routes = Router::new()
         .route("/auth/me", get(current_user))
         .route("/me", get(read_profile).patch(update_profile))
+        .route("/me/events", get(list_my_events))
         .route("/me/avatar/upload-url", post(create_avatar_upload_url))
         .route("/me/avatar/confirm", post(confirm_avatar_upload))
         .route("/events", post(create_event))
@@ -861,6 +901,42 @@ async fn read_event(
     Ok(Json(ApiResponse::new(build_event_response(event))))
 }
 
+async fn list_my_events(
+    State(state): State<SharedAppState>,
+    current_user: CurrentUser,
+    Query(query): Query<ListEventsQuery>,
+) -> Result<Json<ApiResponse<HostEventListResponse>>, AppError> {
+    let filter = parse_host_event_list_filter(query.status.as_deref())?;
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+
+    validate_pagination(page, per_page)?;
+
+    let offset = page
+        .checked_sub(1)
+        .and_then(|page_index| page_index.checked_mul(per_page))
+        .ok_or_else(|| AppError::bad_request("page is too large"))?;
+    let items =
+        events::list_events_for_host(&state.db_pool, current_user.id, filter, per_page, offset)
+            .await
+            .map_err(AppError::from)?
+            .into_iter()
+            .map(build_host_event_list_item_response)
+            .collect();
+    let total_count = events::count_events_for_host(&state.db_pool, current_user.id, filter)
+        .await
+        .map_err(AppError::from)?;
+    let total_pages = if total_count == 0 { 0 } else { (total_count + per_page - 1) / per_page };
+
+    Ok(Json(ApiResponse::new(HostEventListResponse {
+        items,
+        page,
+        per_page,
+        total_count,
+        total_pages,
+    })))
+}
+
 async fn update_event(
     State(state): State<SharedAppState>,
     Path(event_id): Path<Uuid>,
@@ -1277,6 +1353,30 @@ fn build_event_response(event: events::Event) -> EventResponse {
     }
 }
 
+fn build_host_event_list_item_response(row: events::HostEventListRow) -> HostEventListItemResponse {
+    HostEventListItemResponse {
+        id: row.id,
+        host_id: row.host_id,
+        title: row.title,
+        slug: row.slug,
+        description_md: row.description_md,
+        start_at: row.start_at,
+        end_at: row.end_at,
+        timezone: row.timezone,
+        location_type: row.location_type,
+        location_text: row.location_text,
+        location_url: row.location_url,
+        capacity: row.capacity,
+        visibility: row.visibility,
+        status: row.status,
+        cover_image_id: row.cover_image_id,
+        attendee_count: row.attendee_count,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        cancelled_at: row.cancelled_at,
+    }
+}
+
 async fn require_host_event(
     state: &SharedAppState,
     event_id: Uuid,
@@ -1286,6 +1386,31 @@ async fn require_host_event(
         .await
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found("event was not found"))
+}
+
+fn parse_host_event_list_filter(
+    value: Option<&str>,
+) -> Result<events::HostEventListFilter, AppError> {
+    match value.map(str::trim) {
+        None | Some("") => Err(AppError::bad_request("status must be provided")),
+        Some(value) if value.len() > 32 => Err(AppError::bad_request("status is too long")),
+        Some("draft") => Ok(events::HostEventListFilter::Draft),
+        Some("upcoming") => Ok(events::HostEventListFilter::Upcoming),
+        Some("past") => Ok(events::HostEventListFilter::Past),
+        _ => Err(AppError::bad_request("status must be one of draft, upcoming, or past")),
+    }
+}
+
+fn validate_pagination(page: i64, per_page: i64) -> Result<(), AppError> {
+    if page < 1 {
+        return Err(AppError::bad_request("page must be greater than zero"));
+    }
+
+    if !(1..=100).contains(&per_page) {
+        return Err(AppError::bad_request("per_page must be between 1 and 100"));
+    }
+
+    Ok(())
 }
 
 fn normalize_required_text(value: &str, field_name: &'static str) -> Result<String, AppError> {
