@@ -107,7 +107,7 @@ export function EventDetailPage() {
         const refreshed = await refreshSession();
         const currentSession = useAuthStore.getState().session;
         const data = await requestJson<PublicEventDetailResponse>(
-          `/events/${encodeURIComponent(slug)}`,
+          `/public/events/${encodeURIComponent(slug)}`,
           {
             token:
               refreshed && currentSession ? currentSession.accessToken : null,

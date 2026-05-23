@@ -656,7 +656,7 @@ pub fn router(state: SharedAppState) -> Router {
         .route("/auth/verify-email", post(verify_email))
         .route("/auth/resend-verification", post(resend_verification))
         .route("/events", get(list_public_events))
-        .route("/events/{slug}", get(read_public_event))
+        .route("/public/events/{slug}", get(read_public_event))
         .route("/validation-probe", post(validation_probe))
         .merge(protected_routes)
         .with_state(state)

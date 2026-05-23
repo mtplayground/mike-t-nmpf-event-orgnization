@@ -329,7 +329,7 @@ async function installApiMock(page: Page, state: MockState) {
       return;
     }
 
-    if (method === 'GET' && url.pathname === `/events/${eventSlug}`) {
+    if (method === 'GET' && url.pathname === `/public/events/${eventSlug}`) {
       const user = optionalUserFromAuthHeader(
         state,
         request.headers().authorization,
