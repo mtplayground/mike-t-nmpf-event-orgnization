@@ -12,6 +12,7 @@ mod extract;
 mod logging;
 mod object_storage;
 mod password_reset;
+mod reminders;
 mod registrations;
 mod refresh_tokens;
 mod shutdown;
@@ -36,6 +37,8 @@ async fn main() -> Result<(), io::Error> {
     let db_pool = database::connect(&config.database)
         .await
         .map_err(io::Error::other)?;
+    let _reminder_service =
+        reminders::ReminderService::spawn(db_pool.clone(), email_service.clone());
     let object_storage = object_storage::ObjectStorageClient::from_config(&config.object_storage)
         .await
         .map_err(io::Error::other)?;
